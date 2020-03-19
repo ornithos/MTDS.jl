@@ -1,0 +1,14 @@
+name = "MTDS"
+uuid = "74fb3a10-692e-11ea-3656-8f980201e5bc"
+authors = ["Alex Bird <abird@turing.ac.uk>"]
+version = "0.1.0"
+
+[deps]
+ArgCheck = "dce04be8-c92d-5529-be00-80e4d2c0e197"
+BSON = "fbb218c0-5317-5bc6-957e-2ee96dd4b1f0"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+Formatting = "59287772-0a20-5a39-b81b-1366585eb4c0"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
