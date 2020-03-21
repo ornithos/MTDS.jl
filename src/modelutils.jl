@@ -1,15 +1,11 @@
 module modelutils
 
-using Flux   # must be Flux@0.90
-using BSON
-using ArgCheck, Dates
+using ..Flux   # must be Flux@0.90
+using ..BSON
+using ..ArgCheck, ..Dates
 
-export save, load!, chan3cat, unsqueeze, MultiDense, mlp, BRNNenc, randn_repar
+export save, load!
 
-
-unsqueeze(xs, dim) = reshape(xs, (size(xs)[1:dim-1]..., 1, size(xs)[dim:end]...));
-
-randn_repar(σ::AbstractArray, n, d, stochastic=true) = !stochastic ? zeros(Float32, n, d) : σ .* randn(Float32, n,d)
 
 if Flux.has_cuarrays()
     using CuArrays
@@ -24,23 +20,6 @@ end
 chan3cat(x::AbstractArray{T,4}) where T = cat(x, zero(x)[:,:,1:1,:], dims=3)
 chan3cat(x::AbstractArray{T,3}) where T = cat(x, zero(x)[:,:,1:1], dims=3)
 
-
-"""
-    get_strtype_wo_params(x)
-Useful for models defined here. The print (or typeof) for these structs result
-in the overall type, plus a load of parameters, or details in parentheses. This
-function just returns the first part: the overall type, without all the other
-junk. This uses the Base.show methods, but captures the output via IOBuffer.
-"""
-function get_strtype_wo_params(x)
-    _io = IOBuffer()
-    print(_io, x)    # (does not print to stdout)
-    tstr = String(take!(_io))
-    close(_io)
-    ixparen = findfirst("(", tstr)
-    ixparen === nothing && return tstr
-    return tstr[1:first(ixparen)-1]
-end
 
 
 """
@@ -121,6 +100,21 @@ function Base.show(io::IO, l::BRNNenc)
   show(l.forward); print(", "); show(l.backward)
 end
 
+
+################################################################################
+##  Generate samples from posterior (using encoder) via reparameterization    ##
+################################################################################
+
+randn_repar(σ::AbstractArray, n, d, stochastic=true) = !stochastic ? zeros(Float32, n, d) : σ .* randn(Float32, n,d)
+
+function posterior_sample(enc, dec, input, T_max, stochastic=true)
+    Flux.reset!(enc)
+    for tt = 1:T_max; enc(input[:,tt,:]); end
+    μ_, σ_ = dec(enc.state)
+    n, d = size(μ_)
+    smp = μ_ + randn_repar(σ_, n, d, stochastic)
+    return smp, μ_, σ_
+end
 
 
 
@@ -219,4 +213,3 @@ end
 
 
 end
-

@@ -1,10 +1,46 @@
 module util
 using Base.Threads: @threads
+using ..Formatting, ..Distributions
+using Sobol
+using Random: GLOBAL_RNG, MersenneTwister
+
+
+export unsqueeze
+
+
+################################################################################
+##                                                                            ##
+##                                Generic                                     ##
+##                                                                            ##
+################################################################################
+
 
 e_k(T, n, k) = begin; out = zeros(T, n); out[k] = 1; out; end
 e_k(n, k) = e_k(Float32, n, k)
 e1(T, n) = e_k(T, n, 1)
 e1(n) = e_k(Float32, n, 1)
+
+unsqueeze(xs, dim) = reshape(xs, (size(xs)[1:dim-1]..., 1, size(xs)[dim:end]...));
+vflatten(x) = reduce(vcat, x)
+collapsedims1_2(X::AbstractArray) = reshape(X, (prod(size(X)[1:2]), size(X)[3]))
+"""
+    get_strtype_wo_params(x)
+
+Useful for highly-parameterized models. The print (or typeof) for these structs
+result in the overall type, plus a load of parameters, or details in
+parentheses. This function just returns the first part: the overall type,
+without all the other junk. This uses the Base.show methods, but captures the
+output via IOBuffer.
+"""
+function get_strtype_wo_params(x)
+    _io = IOBuffer()
+    print(_io, x)    # (does not print to stdout)
+    tstr = String(take!(_io))
+    close(_io)
+    ixparen = findfirst("(", tstr)
+    ixparen === nothing && return tstr
+    return tstr[1:first(ixparen)-1]
+end
 
 function sq_diff_matrix(X, Y)
     #=
@@ -71,5 +107,105 @@ end
 softmax_lse!(xs; dims=1) = softmax_lse!(xs, xs; dims=dims)
 softmax_lse(xs; dims=1) = softmax_lse!(similar(xs), xs; dims=dims)
 
+
+################################################################################
+##                                                                            ##
+##                             Random samples                                 ##
+##    These are all copied from my AxUtil package to avoid further imports    ##
+##                                                                            ##
+################################################################################
+
+
+
+sobol_gaussian(n, d) = sobol_gaussian(GLOBAL_RNG, n, d)
+"""
+    sobol_gaussian([rng::MersenneTwister,] n, d)
+
+Randomized Quasi Monte Carlo samples from a `d` dimensional unit Gaussian. This
+function returns `n` such samples in a ``n × d`` matrix. The QMC sequence used
+here is the Sobol sequence.
+"""
+function sobol_gaussian(rng::MersenneTwister, n, d)
+    (n == 0) && return zeros(d,0)'
+    s = SobolSeq(d)
+    p = reduce(hcat, [next!(s) for i = 1:n])
+    ϵ = rand(rng, d)
+    prand = [(p[j,:] .+ ϵ[j]) .% 1.0 for j in 1:d]
+    p = reduce(vcat, [quantile.(Normal(), prand[j])' for j in 1:d])'
+    return p
 end
 
+
+randomised_sobol(n, d) = randomised_sobol(GLOBAL_RNG, n, d)
+"""
+    randomised_sobol([rng::MersenneTwister,] n, d)
+Generate `n` samples from `d`-dimensional Sobol sequence, and applying a random
+affine mapping to the collection on the [0,1]^d torus.
+"""
+function randomised_sobol(rng::MersenneTwister, n, d)
+    s = SobolSeq(d)
+    p = reduce(hcat, [next!(s) for i = 1:n])
+    ϵ = rand(rng, d)
+    prand = [(p[j,:] .+ ϵ[j]) .% 1.0 for j in 1:d]
+    return hcat(prand...)
+end
+
+
+# randomised Sobol within rectangle
+uniform_rand_sobol(n, lims...) = uniform_rand_sobol(GLOBAL_RNG, n, lims...)
+"""
+    uniform_rand_sobol([rng::MersenneTwister,] n, lims)
+
+Randomised sobol sequence (see `randomised_sobol`), mapped to be a quasi random
+sample of a uniform distribution on a hyper-cuboid with limits specified by
+`lims`. For example:
+
+    uniform_rand_sobol(N, [x_l, x_u], [y_l, y_u])
+
+generates a QMC sample on the rectangle ``[x_l, x_u] × [y_l, y_u]```, with
+the first coordinate drawn at random in ``[x_l, x_u]`` and so on.
+"""
+function uniform_rand_sobol(rng::MersenneTwister, n, lims...)
+    d = length(lims)
+    rsob = randomised_sobol(rng, n, d)
+    for (i, interval) in enumerate(lims)
+        @assert (length(interval) == 2) format("interval {:d} does not have length 2", i)
+        rsob[:,i] .*= diff(interval)
+        rsob[:,i] .+= interval[1]
+    end
+    return rsob
+end
+
+
+
+function categorical_sampler(p::AbstractVector, n::Int)
+    """
+        categorical_sampler(p::AbstractVector, n::Int)
+
+    Categorical sampling using a linear scan strategy, which is surprisingly
+    efficient for small `n`. Unlike `rand(Categorical(p), n)`, this function
+    accepts Float32 as well as Float64, and is robust in case of `sum(p) != 1`.
+    """
+    m = length(p)
+    x = zeros(Int32, n)
+
+    function linearsearch(p::AbstractArray, m::Int64, rn)
+        cs = 0.0
+        for ii in 1:m
+            @inbounds cs += p[ii]
+            if cs > rn
+                return ii
+            end
+        end
+        return m
+    end
+
+    sump = sum(p)
+    for i in 1:n
+        rn = rand()*sump
+        @inbounds x[i] = linearsearch(p, m, rn)
+    end
+    return x
+end
+
+end
