@@ -21,9 +21,9 @@ module model
     using ..Distributions, Formatting
 
     import ..save, ..load!
-    import ..modelutils: randn_repar, posterior_sample, MultiDense, mlp, get_strtype_wo_params
+    import ..modelutils: randn_repar, posterior_sample, MultiDense, mlp
     using ..util
-    import ..util: unsqueeze
+    import ..util: unsqueeze, get_strtype_wo_params
 
     export load!, create_mtlds, MTLDS_variational,
            forward, encode, reconstruct, elbo, elbo_w_kl
