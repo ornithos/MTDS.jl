@@ -1,11 +1,12 @@
 abstract type MTDSModel end
 
 # Common interface
+is_amortized(m::MTDSModel) = true   # assumption is that default setting uses encoder.
 
 forward(m::MTDSModel, x0, z, U; T_steps=size(U, 2)) =
-    error("Not Implemented Yet: {:s}. Please implement a forward proc (given z).", string(typof(m)))
+    error(format("Not Implemented Yet: {:s}. Please implement a forward proc (given z).", string(typeof(m))))
 encode(m::MTDSModel, Y, U; T_steps=size(Y, 2), stochastic=true) =
-    error("Not Implemented Yet: {:s}. Please implement an encode proc.", string(typof(m)))
+    error(format("Not Implemented Yet: {:s}. Please implement an encode proc.", string(typeof(m))))
 
 function reconstruct(m::MTDSModel, Y, U; T_steps=size(Y, 2), enc_steps=T_steps, stochastic=true)
     @argcheck size(Y,2) == size(U,2)
@@ -13,8 +14,15 @@ function reconstruct(m::MTDSModel, Y, U; T_steps=size(Y, 2), enc_steps=T_steps, 
     forward(m, smpx0, smpz, U; T_steps=T_steps)
 end
 
-forward_multiple_z(m::MTDSModel, z, u::AbstractMatrix) = (u_rep = repeat(u, outer=(1,1,size(z, 2))); m(z, u_rep))
-forward_multiple_z(m::MTDSModel, z, u::AbstractVector) = (u_rep = repeat(reshape(u,1,length(u),1), outer=(1,1,size(z, 2))); m(z, u_rep))
+function forward_multiple_z(m::MTDSModel, z, u::AbstractMatrix; maxbatch=200)
+    M = size(z, 2)
+    ŷs = map(Iterators.partition(1:M, maxbatch)) do cbatch
+        u_rep = repeat(u, outer=(1, 1, length(cbatch)));
+        m(z[:, cbatch], u_rep)
+    end
+    cat(ŷs..., dims=3)   # problematic if length(ŷs) is too large, but there's no nice `reduce` version in Julia yet.
+end
+forward_multiple_z(m::MTDSModel, z, u::AbstractVector; maxbatch=200) = forward_multiple_z(m, z, unsqueeze(u,1); maxbatch=maxbatch)
 
 do_importance_smp(m::MTDSModel, y, u, tT=80, M=200) = error(format("Not implemented yet for model type: {:s}", get_strtype_wo_params(m)))
 
@@ -53,7 +61,7 @@ end
 
 
 function train_mco!(m, Ys, Us, nepochs; opt_pars=training_params_mco(), tT=size(Ys,2),
-        ps=Flux.params(m), verbose=true, logstd_prior=nothing)
+        ps=Flux.params(m), verbose=true, logstd_prior=nothing, maxbatch=200)
     has_inputs = check_inputs_outputs(m, Ys, Us)
 
     # untracked (no-AD) version of model
@@ -79,8 +87,8 @@ function train_mco!(m, Ys, Us, nepochs; opt_pars=training_params_mco(), tT=size(
 
             # Get posterior samples via Importance Sampling
             # suppresswarn = if Us vary per batch (i.e. has inputs), warn to say this is bad the 1st time.
-            Z, W, logp = aggregate_importance_smp(m_u, y, u_is; tT=tT, M=M, suppresswarn=!mco_warn)
-            smps = [util.categorical_sampler(W[:, i], M_rsmp) for i ∈ 1:N]  |> util.vflatten
+            Z, W, logp = aggregate_importance_smp(m_u, y, u_is; tT=tT, M=M, suppresswarn=!mco_warn, maxbatch=maxbatch)
+            smps = [util.categorical_sampler(W[:, i], M_rsmp) for i ∈ 1:Nb]  |> util.vflatten
             zsmp = Z[:, smps]
 
             # Get reconstruction error for these samples
@@ -106,10 +114,10 @@ function train_mco!(m, Ys, Us, nepochs; opt_pars=training_params_mco(), tT=size(
         opt_pars.opt.eta *= opt_pars.lr_decay
 
         # Logging
-        history[ee] = epoch_logp
+        history[ee] = epoch_logp / opt_pars.niter
         etime = time() - start_time
         verbose && (printfmtln("Epoch {:04d} Loss: {:.2f}, logp: {:.2f} ({:02.1f}s)",
-            ee, epoch_loss, epoch_logp, etime); flush(stdout))
+            ee, epoch_loss / opt_pars.niter, epoch_logp / opt_pars.niter, etime); flush(stdout))
     end
     history
 end
@@ -128,6 +136,7 @@ function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=siz
     for ee in 1:nepochs
         epoch_loss, epoch_kl = 0, 0
         start_time = time()
+        is_hard_em = (opt_pars.hard_em_epochs > 0)
 
         for i in 1:opt_pars.niter
             ixs = rand(1:N, Nb)
@@ -137,11 +146,11 @@ function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=siz
             # Calculate ELBO
             loss, kl = elbo_w_kl(m, y, u;
                 kl_coeff = β_kl * opt_pars.kl_pct,
-                stochastic = (opt_pars.hard_em_epochs <= 0),
+                stochastic = !is_hard_em,
                 logstd_prior = logstd_prior)
 
             # update KL annealing
-            opt_pars.kl_pct = min(opt_pars.kl_pct + opt_pars.kl_anneal, 1.0f0)
+            is_hard_em && (opt_pars.kl_pct = min(opt_pars.kl_pct + opt_pars.kl_anneal, 1.0f0))
 
             epoch_loss += loss.data
             epoch_kl += kl.data
@@ -160,7 +169,7 @@ function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=siz
         etime = time() - start_time
         logstd_penalty = opt_pars.niter*tT*sum(Tracker.data(m.logstd)) / 2
         verbose && (printfmtln("Epoch {:04d} Loss: {:.2f}, kl: {:.2f}, p_logstd: {:.2f} ({:02.1f}s)",
-            ee, epoch_loss, epoch_kl, logstd_penalty, etime); flush(stdout))
+            ee, epoch_loss  / opt_pars.niter, epoch_kl  / opt_pars.niter, logstd_penalty  / opt_pars.niter, etime); flush(stdout))
     end
     history
 end

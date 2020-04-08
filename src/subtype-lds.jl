@@ -256,7 +256,7 @@ function elbo_w_kl(m::MTLDS_variational, y, u; kl_coeff=1.0f0, stochastic=true,
 
     # Prior regularization of emission stdev.
     if !(logstd_prior === nothing)
-        nllh += sum(x->x^2, (m.logstd - logstd_prior[1])./logstd_prior[2])/2
+        nllh += sum(x->x^2, (m.logstd .- logstd_prior[1])./logstd_prior[2])/2
     end
     nllh + kl, kl
 end
@@ -280,7 +280,7 @@ elbo(m::MTLDS_variational, y, u; kl_coeff=1.0f0, stochastic=true, logstd_prior=n
 
 
 function aggregate_importance_smp(m::MTLDS_variational, y::AbstractArray{T,3}, u::AbstractArray{T,3}=zeros(T, size(y)[1,2]..., 1);
-        tT=80, M=200, suppresswarn=false) where T
+        tT=80, M=200, maxbatch=200, suppresswarn=false) where T
     # !(sum(abs, diff(u, dims=3)) ≈ 0)
     !suppresswarn && size(u,3) > 1 && @warn "different batches of u can result in slow execution. Works best with zero inputs."
 
@@ -291,10 +291,10 @@ function aggregate_importance_smp(m::MTLDS_variational, y::AbstractArray{T,3}, u
     # if each y has a different input, we cannot amortize the draws, so dispatch to individual fn:
     if size(u,3) > 1
         @argcheck size(u,3) == size(y, 3)
-        return _aggregate_importance_smp_noamortize(m, y, u, Z; tT=tT, M=M)
+        return _aggregate_importance_smp_noamortize(m, y, u, Z; tT=tT, M=M, maxbatch=maxbatch)
     end
 
-    yhats = forward_multiple_z(m, Z, dropdims(u, dims=3))
+    yhats = forward_multiple_z(m, Z, dropdims(u, dims=3); maxbatch=maxbatch)
     s = exp.(m.logstd)
     yhats, y = util.collapsedims1_2(yhats ./ s), util.collapsedims1_2(y ./ s)
     logW = -util.sq_diff_matrix(yhats', y') / 2  .- tT * sum(m.logstd) / 2
@@ -317,8 +317,8 @@ function _aggregate_importance_smp_noamortize(m::MTLDS_variational, y::AbstractA
 end
 
 function _importance_smp_individual(m::MTLDS_variational, y::AbstractArray{T,2},
-        u::AbstractArray{T,2}, z::AbstractArray{T,2}; tT=80, M=200) where T
-    yhats = forward_multiple_z(m, z, u)    # n_y × tT × n_b
+        u::AbstractArray{T,2}, z::AbstractArray{T,2}; tT=80, M=200, maxbatch=200) where T
+    yhats = forward_multiple_z(m, z, u; maxbatch=maxbatch)    # n_y × tT × n_b
 
     llh_by_z = - _gauss_nllh_individual_bybatch(yhats, y, m.logstd)
     W, lse = util.softmax_lse!(unsqueeze(llh_by_z, 2); dims=1)
