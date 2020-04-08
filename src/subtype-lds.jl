@@ -23,7 +23,8 @@ is not difficult to extend the model to relax each of these, especially (2-4).
 The model is variational in ``z``, and contains an encoder (`mt_enc`) which is
 an RNN which encodes the sequences `Y` and `U` (which should be of size ``d × T ×
 n_b``, where ``d`` is the size of each vector, ``T`` is the sequence length, and
-``n_b`` is the batch size) into a single vector. The `mt_post` network is a
+``n_b`` is the batch size) into a single vector. One can instead perform standard
+(non-amortized VI by using a LookupTable here. The `mt_post` network is a
 network which returns a tuple of (mean, (diagonal) sqrt variance) defining a
 variational Gaussian posterior. The method `encode` will return two tuples, the
 first of which is a sample from this posterior (using reparameterization),
@@ -79,13 +80,20 @@ get_final_layer_dim(l::Dense) = length(l.b)
 function Base.show(io::IO, l::MTLDS_variational)
     d_x0, d_mt = l.d, size(l.mt_post.Dense1.W, 1)
     d_y = get_final_layer_dim(l.emission)
-    d_u = size(l.mt_enc.cell.Wi, 2) - something(d_y, 0)
-    d_uy = d_y === nothing ? "" : format(", in={:d}, out={:d}", d_u, d_y)
-    emission_type = l.flag_mt_emission ? "" : ", non-MT emission function"
-    h0_type = l.flag_mt_x0 ? "MT init state" : "non-MT hidden state"
-    print(io, "MTLDS_variational(state=", d_x0, d_uy, ", d_mt=", d_mt, ", ", emission_type, h0_type,  ")")
+    if (d_y === nothing) || l.mt_enc isa LookupTable
+        d_uy = d_y === nothing ? "" : format(", in=?, out={:d}", d_y)
+    else
+        d_u = size(l.mt_enc.cell.Wi, 2) - something(d_y, 0)
+        d_uy = format(", in={:d}, out={:d}", d_u, d_y)
+    end
+    emission_type = l.flag_mt_emission ? "" : ", *non-MT emission function*"
+    h0_type = l.flag_mt_x0 ? "'MT'" : "'non-MT'"
+    enc_type = l.mt_enc isa LookupTable ? "'Standard VI'" : "'Amortized VI'"
+    print(io, "MTLDS_variational(state=", d_x0, d_uy, ", d_mt=", d_mt, ", ", emission_type,
+    "x0_type=", h0_type,  ", enc_type=", enc_type,")")
 end
 
+is_amortized(m::MTLDS_variational{U,V,W,S,T}) where {U <: LookupTable, V, W, S, T} = false
 
 
 forward(m::MTLDS_variational, z, U; T_steps=size(U, 2)) = forward(m, nothing, z, U; T_steps=T_steps)
@@ -155,7 +163,7 @@ the RNN encoder, `d_mt` of the latent hierarchical variable ``z``.
 ### Optional arguments:
 
 - `encoder` is the encoding RNN for the variational posterior. Can be in {`:RNN`
-, `:GRU`, `:LSTM`}.
+, `:GRU`, `:LSTM`, `:LookupTable`}, with the latter providing standard VI.
 - `emission` specifies the system emission equation, which by
   default is `:linear`, which constructs a MT affine output. Otherwise, any
   callable function that maps a state vector (matrix) → outputs can be given, but
@@ -174,8 +182,10 @@ function create_mtlds(d_x, d_in, d_y, d_enc_state, d_mt; encoder=:LSTM, emission
         init_enc = GRU(d_y+d_in, d_enc_state)
     elseif encoder == :RNN
         init_enc = RNN(d_y+d_in, d_enc_state)
+    elseif encoder == :LookupTable
+        init_enc = LookupTable(d_mt, 0.01f0, -1f0)  # 2/3: initial posterior noise for mu/logstd
     else
-        error("encoder must be specified as :LSTM, :GRU, :RNN")
+        error("encoder must be specified as :LSTM, :GRU, :RNN, :LookupTable")
     end
 
     enc_post = MultiDense(Dense(d_enc_state, d_mt, identity), Dense(d_enc_state, d_mt, σ))

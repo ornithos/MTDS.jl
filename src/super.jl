@@ -149,6 +149,9 @@ function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=siz
                 stochastic = !is_hard_em,
                 logstd_prior = logstd_prior)
 
+            # add any new VI posteriors (never before seen sequences) into Params
+            is_amortized(m) || (ps = Flux.params(ps, Flux.params(m.mt_enc)));
+
             # update KL annealing
             is_hard_em && (opt_pars.kl_pct = min(opt_pars.kl_pct + opt_pars.kl_anneal, 1.0f0))
 

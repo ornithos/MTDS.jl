@@ -21,6 +21,48 @@ chan3cat(x::AbstractArray{T,4}) where T = cat(x, zero(x)[:,:,1:1,:], dims=3)
 chan3cat(x::AbstractArray{T,3}) where T = cat(x, zero(x)[:,:,1:1], dims=3)
 
 
+"""
+    LookupTable(d, mu_sd, logstd_sd, lkp)
+
+A lookup table (Wrapped Dict) for use instead of an encoder for use in standard variational
+inference. The lookup table maps training data (arrays) to mean/logstd Flux.params for
+a Gaussian variational posterior. Where a queried array does not have an entry, LookupTable
+creates one using standard Gaussian variates with `mu_sd` standard deviation for the mean
+and `logstd_sd` standard deviation for the logstd.
+"""
+struct LookupTable
+    d::Int
+    mu_sd::Float32
+    logstd_sd::Float32
+    lkp::Dict
+end
+LookupTable(d, mu_sd=0.001f0, logstd_sd=-1f0) = LookupTable(d, mu_sd, logstd_sd, Dict())
+function Flux.mapleaves(f, s::LookupTable)
+    for (k,v) in s
+        s[k] = f(v)
+    end
+end
+
+(lkp::LookupTable)(x::Flux.TrackedArray) = error("Unable to accept tracked arrays in LookupTable.")
+function (lkp::LookupTable)(x::AbstractVecOrMat{T}) where T
+    # seems inefficient to *always* allocate the default value, but `get` doesn't support
+    # lazy evaluation (so it seems), and below is *MUCH* faster than using try/catch which
+    # adds O(100μs) to what is otherwise a O(1μs) operation.
+    def_value = (Flux.param(randn(T, lkp.d, 1)*lkp.mu_sd), Flux.param(ones(T, lkp.d, 1)*lkp.logstd_sd))
+    mu_sd = get!(lkp.lkp, vec(x), def_value)
+    return (mu_sd[1], σ.(mu_sd[2]))   # pass 'logstd' (!) through sigmoid
+end
+
+function (lkp::LookupTable)(x::AbstractArray{T, 3}) where T
+    mu_sds = [lkp(x[:,:,i]) for i in 1:size(x, 3)]
+    return hcat([mu for (mu, sd) in mu_sds]...), hcat([sd for (mu, sd) in mu_sds]...)
+end
+
+# play nicely with Flux's params.
+Flux.children(m::Iterators.Flatten) = m
+Flux.children(m::Flux.Params) = m        # params is currently not idempotent: this fixes it. 
+                                         # Not sure if unintended consequences though?
+Flux.params(lkp::LookupTable) = Flux.params(Iterators.Flatten(lkp.lkp.vals[findall(lkp.lkp.slots .== 1)]))
 
 """
     MultiDense(Dense(in_1, out_1), Dense(in_2, out_2))
@@ -116,7 +158,12 @@ function posterior_sample(enc, dec, input, T_max, stochastic=true)
     return smp, μ_, σ_
 end
 
-
+function posterior_sample(enc::LookupTable, dec, input, T_max, stochastic=true)
+    μ_, σ_ = enc(input)
+    n, d = size(μ_)
+    smp = μ_ + randn_repar(σ_, n, d, stochastic)
+    return smp, μ_, σ_
+end
 
 ################################################################################
 ##  Save and Load utils for parameters of arbitrary models.                   ##
