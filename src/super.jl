@@ -101,7 +101,7 @@ function train_mco!(m, Ys, Us, nepochs; opt_pars=training_params_mco(), tT=size(
                 loss += sum(x->x^2, (m.logstd .- logstd_prior[1])./logstd_prior[2])/2
             end
 
-            epoch_logp += logp / Nb
+            epoch_logp += sum(logp) / Nb
             epoch_loss += Tracker.data(loss)
 
             # Take gradient

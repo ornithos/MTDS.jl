@@ -288,14 +288,27 @@ elbo(m::MTLDS_variational, y, u; kl_coeff=1.0f0, stochastic=true, logstd_prior=n
     elbo_w_kl(m, y, u; kl_coeff=kl_coeff, stochastic=stochastic, logstd_prior=logstd_prior)[1]
 
 
+"""
+    aggregate_importance_smp(m::MTLDS_variational, y::Tensor, u::Tensor; tT=size(u,2), M=200,
+        maxbatch=200, suppresswarn=false)
 
+Take `M` samples from the prior and use as an aggregate importance sample for *all* `y`,
+where y is a ``n_y × tT × batch`` matrix (i.e. for each ``y`` in the batch). This uses the
+`forward_multiple_z` function on a `MTLDS_variational` object with possible inputs `u`. This
+cannot be efficiently used where each sequence has a different input `u`, and the function
+will yield a warning in this case that it is defaulting to non-aggregated sampling.
+
+Returns the sample matrix `Z` (``d_z × M``), the batch-sample weight matrix, `W`, and the
+total (summed) log probability.
+"""
 function aggregate_importance_smp(m::MTLDS_variational, y::AbstractArray{T,3}, u::AbstractArray{T,3}=zeros(T, size(y)[1,2]..., 1);
-        tT=80, M=200, maxbatch=200, suppresswarn=false) where T
+        tT=size(u,2), M=200, maxbatch=200, suppresswarn=false) where T
     # !(sum(abs, diff(u, dims=3)) ≈ 0)
-    !suppresswarn && size(u,3) > 1 && @warn "different batches of u can result in slow execution. Works best with zero inputs."
+    !suppresswarn && size(u,3) > 1 && @warn "different batches of u can result in slow execution. Defaulting to non-aggregated importance sampling. Works best with zero inputs."
 
     # draw Quasi-Monte Carlo samples
-    d_z, tT = size(m.mt_post.Dense1.W, 1), size(y, 2)
+    d_z = size(m.mt_post.Dense1.W, 1)
+    n_y, _, N = size(y)
     Z = f32(util.sobol_gaussian(M, d_z)')
 
     # if each y has a different input, we cannot amortize the draws, so dispatch to individual fn:
@@ -305,14 +318,30 @@ function aggregate_importance_smp(m::MTLDS_variational, y::AbstractArray{T,3}, u
     end
 
     yhats = forward_multiple_z(m, Z, dropdims(u, dims=3); maxbatch=maxbatch)
-    s = exp.(m.logstd)
-    yhats, y = util.collapsedims1_2(yhats ./ s), util.collapsedims1_2(y ./ s)
-    logW = -util.sq_diff_matrix(yhats', y') / 2  .- tT * sum(m.logstd) / 2
-    W, lse = util.softmax_lse!(logW; dims=1)
-    logp_y = sum(lse) - log(M)  # W, log(1/M sum_j exp(log_j))
+    W, logp_y = _aggregate_importance_smp(yhats, y, m.logstd, tT)
     return Z, W, logp_y
 end
 
+"""
+    _aggregate_importance_smp(y_mc::Tensor, y_query::Tensor, logσ, tT::Int)
+
+Internal aggregate importance sample function which creates the batch-sample importance
+weight matrix, `W` between the `y_mc` samples and `y_query` queries; and the estimated
+marginal log probability of each.
+"""
+function _aggregate_importance_smp(y_mc::AbstractArray{T,3}, y_query::AbstractArray{T,3}, logσ, tT) where T
+    s = exp.(logσ)
+    n_y = length(logσ)
+    M = size(y_mc, 3)
+    y_query, y_mc = util.collapsedims1_2(y_query ./ s), util.collapsedims1_2(y_mc ./ s)
+
+    logW = - util.sq_diff_matrix(y_mc', y_query') / 2   # [log p(y_i | z_j) i = 1..N, j = 1..M]
+    logW .-= tT * (sum(logσ)*2 + n_y*log(2π)) / 2   # normalizing constant
+
+    W, lse = util.softmax_lse!(logW; dims=1)
+    logp_y = lse .- log(M)  # W, log(1/M sum_j exp(log_j))
+    return W, logp_y
+end
 
 function _aggregate_importance_smp_noamortize(m::MTLDS_variational, y::AbstractArray{T,3}, u::AbstractArray{T,3}, Z::AbstractArray{T,2};
         tT=-1, M=-1) where T
