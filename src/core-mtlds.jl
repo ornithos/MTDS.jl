@@ -201,40 +201,6 @@ Flux.@treelike LDSCell_batch_u
 ################################################################################
 
 """
-    feat_extract(z)
-
-A fixed-form feature extractor converting a vector ``\\mathbf{z}`` into the
-vector ``[\\mathbf{z}, \\sin(\\mathbf{z}), \\cos(\\mathbf{z}), \\|\\mathbf{z}\\|]``.
-"""
-feat_extract(z) = reduce(vcat, [z ,sin.(z), cos.(z), sqrt.(sum(x->x^2, z, dims=1))])
-feat_extract(z::TrackedArray) = Tracker.track(feat_extract, z)
-
-
-function feat_extract_deriv(Δ, f, d)
-    out = Δ[1:d,:]
-    for dd in 1:d
-        out[dd,:] .+= (f[d*2+dd,:] .* Δ[d+dd,:])   # cos z_dd * ∇_{d+dd}
-        out[dd,:] .+= -(f[d*1+dd,:] .* Δ[2*d+dd,:])  # - sin z_dd * ∇_{2d+dd}
-        out[dd,:] .+= (f[dd,:] .* Δ[3*d+1,:]) ./ (f[3*d+1,:] .+ 1e-16) # (z_dd /||z||) * ∇_{3d+1}
-    end
-    return out
-end
-
-@grad function feat_extract(z::AbstractVector)
-    zd = Tracker.data(z)
-    d = size(z, 1)
-    f = feat_extract(zd)
-    return f, Δ->let g=feat_extract_deriv(Δ, f, d); (vec(g), ); end
-end
-
-@grad function feat_extract(z::AbstractMatrix)
-    zd = Tracker.data(z)
-    d = size(z, 1)
-    f = feat_extract(zd)
-    return f, Δ->let g=feat_extract_deriv(Δ, f, d); (g, ); end
-end
-
-"""
     A(ψ, d)
 Construct transition matrix `A` using reduced Cayley form from parameter vector
 ψ (extracting relevant elements).
