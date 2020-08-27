@@ -72,11 +72,6 @@ end
 
 Flux.@treelike MTLDS_variational
 
-# get_final_layer_dim is purely used for pretty printing (Base.show)
-get_final_layer_dim(l) = nothing
-get_final_layer_dim(l::Int) = l
-get_final_layer_dim(l::Chain) = get_final_layer_dim(l.layers[end])
-get_final_layer_dim(l::Dense) = length(l.b)
 function Base.show(io::IO, l::MTLDS_variational)
     d_x0, d_mt = l.d, size(l.mt_post.Dense1.W, 1)
     d_y = get_final_layer_dim(l.emission)
@@ -140,12 +135,14 @@ end
     end
 
 
-function encode(m::MTLDS_variational, Y::AbstractArray{T}, U::AbstractArray{T}; T_steps=size(Y, 2), stochastic=true) where T
+encode(m::MTLDS_variational, Y::AbstractArray{T}, U::AbstractArray{T}; T_steps=size(Y, 2), 
+    stochastic=true) where T = encode(m, vcat(U, Y); T_steps=T_steps, stochastic=stochastic)
+
+function encode(m::MTLDS_variational, data_enc::AbstractArray; T_steps=size(data_enc, 2), stochastic=true)
     m.flag_mt_x0 && error("Unable to modulate x0 currently. Change encoder code, and `_mtlds_model_forward`.")
-    smpz, μ_z, σ_z = posterior_sample(m.mt_enc, m.mt_post, vcat(U, Y), size(U, 2), stochastic)
+    smpz, μ_z, σ_z = posterior_sample(m.mt_enc, m.mt_post, data_enc, size(data_enc, 2), stochastic)
     return (smpz, μ_z, σ_z), (nothing, nothing, nothing)   # second tuple is for if x0 has separate encoder.
 end
-
 
 # Cannot define function on an abstract type, so we have to def these inside each subtype.
 (m::MTLDS_variational)(z::AbstractArray{T,2}, U::AbstractArray{T,3}) where T = forward(m, z, U)
@@ -172,9 +169,11 @@ the RNN encoder, `d_mt` of the latent hierarchical variable ``z``.
 - `spherical_var`: whether the emission covariance is spherical (and hence has a
   single parameter) (default: true), or is an axis-aligned ellipsoid with `n_y`
   parameters.
+- `hphi`: default `:MLP`, can be `:Linear`. This determines whether the prior over
+  θ is linear or nonlinear. If == `:MLP`, `d_hidden` specifies layers, o.w. it's ignored.
 """
-function create_mtlds(d_x, d_in, d_y, d_enc_state, d_mt; encoder=:LSTM, emission=:linear, d_hidden=64,
-    spherical_var=false)
+function create_mtlds(d_x, d_in, d_y, d_enc_state, d_mt; encoder=:LSTM, emission=:linear,
+    d_hidden=64, spherical_var=false, hphi=:MLP)
 
     if encoder == :LSTM
         init_enc = LSTM(d_y+d_in, d_enc_state)
