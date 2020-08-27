@@ -153,6 +153,50 @@ diag0(x::TrackedArray) = Tracker.track(diag0, x)
 end
 
 """
+    LDSCell_diag_u{U,V,W}
+Simple LDS struct containing three fields: a (transition coeffs), B (input
+matrix) and h, the initial state.
+"""
+mutable struct LDSCell_diag_u{U,V,W}
+    a::U
+    B::V
+    h::W
+end
+
+# Operation
+function (m::LDSCell_diag_u)(h, x)
+    h = m.a .* h + m.B * x
+    return h, h
+end
+
+Flux.hidden(m::LDSCell_diag_u) = m.h
+Flux.@treelike LDSCell_diag_u
+
+
+"""
+    LDSCell_diag_batch_u{U,V,W}
+Simple LDS struct containing three fields: a (transition coeffs), B (input
+matrix) and h, the initial state. Permits 3D arrays for a, B and performs
+batch updates on the inputs.
+"""
+mutable struct LDSCell_diag_batch_u{U,V,W}
+    a::U
+    B::V
+    h::W
+end
+
+# Operation
+function (m::LDSCell_diag_batch_u)(h, x)
+    h = m.a .* h + batch_matvec(m.B, x)
+    return h, h
+end
+
+Flux.hidden(m::LDSCell_diag_batch_u) = m.h
+Flux.@treelike LDSCell_diag_batch_u
+
+
+
+"""
     LDSCell_simple_u{U,V,W}
 Simple LDS struct containing three fields: A, B (for transition and input
 matrices) and h, the initial state.
