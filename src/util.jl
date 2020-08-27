@@ -1,9 +1,8 @@
 module util
 using Base.Threads: @threads
-using ..Formatting, ..Distributions
+using ..Formatting, ..Distributions, ..StatsBase
 using Sobol
 using Random: GLOBAL_RNG, MersenneTwister
-
 
 export unsqueeze
 
@@ -208,4 +207,165 @@ function categorical_sampler(p::AbstractVector, n::Int)
     return x
 end
 
+
+
+
+################################################################################
+##                                                                            ##
+##                    Preprocessing: StandardScaler                           ##
+##                                                                            ##
+################################################################################
+# This was originally from my Mocap project, but works ~ like Sklearn's version
+
+"""
+    fit(MyStandardScaler, X, dims)
+Fit a standardisation to a matrix `X` s.t. that the rows/columns have mean zero and standard deviation 1.
+This operation calculates the mean and standard deviation and outputs a MyStandardScaler object `s` which
+allows this same standardisation to be fit to any matrix using `transform(s, Y)` for some matrix `Y`. Note
+that the input matrix `X` is *not* transformed by this operation. Instead use the above `transform` syntax
+on `X`.
+Note a couple of addendums:
+1. Any columns/rows with constant values will result in a standard deviation of 1.0, not 0. This is to avoid NaN errors from the transformation (and it is a natural choice).
+2. If only a subset of the rows/columns should be standardised, an additional argument of the indices may be given as:
+    `fit(MyStandardScaler, X, operate_on, dims)`
+    The subset to operate upon will be maintained through all `transform` and `invert` operations.
+"""
+mutable struct MyStandardScaler{T}
+    μ::AbstractArray{T}
+    σ::AbstractArray{T}
+    dims
+end
+
+Base.copy(s::MyStandardScaler) = MyStandardScaler(copy(s.μ), copy(s.σ), copy(s.operate_on), copy(s.dims))
+
+StatsBase.fit(::Type{MyStandardScaler}, X::AbstractArray, dims=1) = 
+    MyStandardScaler(mean(MaskedArray(X), dims=dims), 
+    std(MaskedArray(X), dims=dims), dims) |> post_fit
+
+function post_fit(s::MyStandardScaler)
+    bad_ixs = (s.σ .== 0)
+    s.σ[bad_ixs] .= 1
+    s
+end
+
+function scale_transform(s::MyStandardScaler, X::AbstractArray, dims=s.dims)
+    (dims != s.dims) && @warn "dim specified in transform is different to specification during fit."
+    mu, sigma = s.μ, s.σ
+    (X .- mu) ./ sigma
+end
+
+function invert(s::MyStandardScaler, X::AbstractArray, dims=s.dims)
+    (dims != s.dims) && @warn "dim specified in inversion is different to specification during fit."
+    mu, sigma = s.μ, s.σ
+    (X .* sigma) .+ mu
+end
+
+
+
+################################################################################
+##                                                                            ##
+##               Handling missing (NaN) values: MaskedArray                   ##
+##                                                                            ##
+################################################################################
+
+"""
+    MaskedArray(x::AbstractArray)
+
+I've been dissatisfied for some time about how AD engines etc tend to handle missing values (historically, they basically couldn't, and required a hack. The hack is not terribly hard, but it requires additional overhead for coding and data structures etc. This was an attempt to show that this could be easily handled using a new type of array. But... turns out that a lot more work is needed and I need to understand more about Julia internals to make this work properly (especially Broadcasting), and would need to spend quite some time integrating with Flux's Tracker which is now ~ defunct anyway. So I gave up halfway! Nevertheless, I found the resulting class moderately useful.
+
+The idea is that missing values (represented by NaNs¹) can be handled by a (`.mask`) matrix which determines where the missing values go. The array is then represented with a (`.data`) matrix **only** with numbers in ℝ -- where the missing values might be replaced with any value, but often zero. To recover the original matrix with missing values, the `as_nan` function creates a copy of the `.data` and places the `NaN`s back in their correct place from the mask. 
+
+This allows a couple of useful properties for writing AD-enabled code:
+
+1. The missing value mask is carried around *with* the data, rather than requiring separate book-keeping.
+1. The AD code can just operate on the `.data`, but then the mask is used to zero out all the gradients which should be ignored.
+1. We can natively extract the dimensions of the missing entries e.g. to use as an input mask for a network using `.mask`.
+1. Useful versions of `sum`, `mean`, `std` and `var` can be (and have been) defined which ignores the `NaN`s as usually required rather than needing to use some alternative library like NaNMath.
+
+**Broadcasting Issues**:
+
+THIS DOES NOT ALLOW BROADCASTING, and getting to grips with how broadcasting works is necessary to sort this. Simply subtyping from AbstractArray prob doesn't work. The major problem right now is that by default broadcasting iterates over the entire object *one element at a time*. This results in using single indices (scalar values) from the object, which the `.getindex` method implicitly doesn't support :(. To get this to work I'll need to catch when none of the indices are slices and force the result back into an array prior to --> MaskedArray. But even this won't help in the end, as it will result in an Array of 1x1 MaskedArrays. There's no inspiration I can get from TrackedArrays or DualNumbers etc. Utimately I'll need to rtfm here: https://docs.julialang.org/en/latest/manual/interfaces/#man-interfaces-broadcasting-1
+
+... BUT even then I can't natively plug these arrays into Flux, since I'll need to write lots of custom methods to interact with TrackedArrays, and this could easily go wrong. It's almost certainly best just to use MaskedArrays as a useful container and apply the data and mask explicitly during the Flux forward pass... 😂
+
+
+**Footnote:**
+
+¹I know Julia introduced `missing` with very good support and apparently performance some time ago, but this idea predates this being well supported. I don't know how well it is supported in AD these days. This whole data structure might be entirely unnecessary these days.
+"""
+struct MaskedArray{T, N} <: AbstractArray{T, N}
+    data::AbstractArray{T, N}
+    mask::AbstractArray{Bool, N}
+end
+MaskedArray(T::DataType, x::AbstractArray, b::AbstractArray) = MaskedArray(T.(x), T.(b))
+
+function make_masked_array(x::AbstractArray)
+    mask = isnan.(x)
+    x = copy(x)
+    x[mask] .= 0
+    return MaskedArray(x, .!mask)
+end
+MaskedArray(T::DataType, x::AbstractArray) = make_masked_array(T.(x))
+MaskedArray(x::AbstractArray) = make_masked_array(x)
+
+data(x::MaskedArray) = x.data
+mask(x::MaskedArray) = x.mask
+
+# A key problem is here => this works fine provided >=1 of the indices are  
+Base.getindex(x::MaskedArray, I...) = MaskedArray(x.data[I...], x.mask[I...])
+Base.size(x::MaskedArray) = size(data(x))
+Base.size(x::MaskedArray, j::Int) = size(data(x), j)
+Base.length(x::MaskedArray) = length(data(x))
+Base.show(io::IO, ::MIME"text/plain", x::MaskedArray) = (println("Masked array with data:"); 
+    flush(stdout); display(as_nan(x)))
+Base.display(io::IO, x::MaskedArray) = (println("Masked array with data:"); 
+    flush(stdout);  display(as_nan(x)))
+
+function _as_missing(x::MaskedArray{T,N}) where {T,N}
+    y::AbstractArray{Union{Missing, T}} = copy(x.data)
+    y[.!x.mask] .= missing
+    y
+end
+
+# (Possibly) useful ops re applying the mask
+as_nan(x::MaskedArray{T,N}) where {T,N} = replace(_as_missing(x), missing=>T(NaN))
+zero_maskvals(x::MaskedArray, y::AbstractArray) = y .* mask(x)
+zero_maskvals(x::MaskedArray) = zero_maskvals(x, data(x))
+apply_mask(x::MaskedArray, y::AbstractArray) = MaskedArray(zero_maskvals(x, y), mask(x))
+
+
+stacked(x::MaskedArray) = vcat(data(x), mask(x))
+stacked(x::MaskedArray, I...) = vcat(data(x)[I...], mask(x)[I...])
+hstacked(x::MaskedArray) = hcat(data(x), mask(x))
+hstacked(x::MaskedArray, I...) = hcat(data(x)[I...], mask(x)[I...])
+
+# # For vcat in encode method
+# Base.vcat(x::MaskedArray, y::MaskedArray) = MaskedArray(vcat(data(x), data(y)), 
+#     vcat(mask(x), mask(y)))
+
+# For comparison and use as Dict keys
+Base.hash(x::MaskedArray, h::UInt) = hash((data(x), mask(x)), h)
+Base.:(==)(x::MaskedArray, y::MaskedArray) = hash(x) == hash(y)
+
+# Standard operators
+Base.Array(x::MaskedArray) = as_nan(x)
+Base.:+(x::MaskedArray, y::AbstractArray) = MaskedArray(data(x) + y, mask(x))
+Base.:+(x::AbstractArray, y::MaskedArray) = MaskedArray(x + data(y), mask(y))
+Base.:-(x::MaskedArray, y::AbstractArray) = MaskedArray(data(x) - y, mask(x))
+Base.:-(x::AbstractArray, y::MaskedArray) = MaskedArray(x - data(y), mask(y))
+Base.:*(x::MaskedArray, y::AbstractArray) = MaskedArray(data(x) * y, mask(x))
+Base.:*(x::AbstractArray, y::MaskedArray) = MaskedArray(x * data(y), mask(y))
+Base.:/(x::MaskedArray, y::AbstractArray) = MaskedArray(data(x) / y, mask(x))
+Base.:/(x::AbstractArray, y::MaskedArray) = MaskedArray(x / data(y), mask(y))
+Base.sum(x::MaskedArray) = sum(data(x))
+Base.sum(x::MaskedArray; dims) = sum(data(x), dims=dims)
+StatsBase.mean(x::MaskedArray; dims) = sum(x, dims=dims) ./ sum(mask(x), dims=dims)
+function StatsBase.var(x::MaskedArray; dims)
+    mu = mean(x, dims=dims)
+    return sum(z->z^2, (data(x) .- mu) .* mask(x), dims=dims) ./ (sum(mask(x), dims=dims) .- 1)
+end
+StatsBase.std(x::MaskedArray; dims) = sqrt.(var(x; dims=dims))
+
+Base.selectdim(A::MaskedArray, d::Integer, i) = MaskedArray(Array(selectdim(data(A), d, i)),
+    Array(selectdim(mask(A), d, i)))
 end

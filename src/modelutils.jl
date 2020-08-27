@@ -21,6 +21,18 @@ chan3cat(x::AbstractArray{T,4}) where T = cat(x, zero(x)[:,:,1:1,:], dims=3)
 chan3cat(x::AbstractArray{T,3}) where T = cat(x, zero(x)[:,:,1:1], dims=3)
 
 
+# get_final_layer_dim from an arbitrary Chain of layers.
+# This was created for pretty printing (Base.show) where n_y was unavailable in MT-LDS.
+get_final_layer_dim(l) = nothing
+get_final_layer_dim(l::Int) = l
+get_final_layer_dim(l::Chain) = get_final_layer_dim(l.layers[end])
+get_final_layer_dim(l::Dense) = length(l.b)
+
+get_first_layer_dim(l) = nothing
+get_first_layer_dim(l::Int) = l
+get_first_layer_dim(l::Chain) = get_first_layer_dim(l.layers[1])
+get_first_layer_dim(l::Dense) = size(l.W, 2)
+
 """
     LookupTable(d, mu_sd, logstd_sd, lkp)
 
@@ -63,6 +75,40 @@ Flux.children(m::Iterators.Flatten) = m
 Flux.children(m::Flux.Params) = m        # params is currently not idempotent: this fixes it. 
                                          # Not sure if unintended consequences though?
 Flux.params(lkp::LookupTable) = Flux.params(Iterators.Flatten(lkp.lkp.vals[findall(lkp.lkp.slots .== 1)]))
+
+
+"""
+    PartialSplit(ixs1, ixs2, split_on_d, fn1, fn2)
+
+Splits an input in two on dimension ``split_on_d`` according to the two UnitRange vectors
+``ix1`` and ``ix2``, and passes the result into functions ``fn1`` and ``fn2`` respectively.
+"""
+struct PartialSplit{V,W}
+    ixs1::UnitRange
+    ixs2::UnitRange
+    split_on_d::Int
+    fn1::V
+    fn2::W
+end
+
+function (ps::PartialSplit)(x::AbstractArray)
+    x1 = selectdim(x, ps.split_on_d, ps.ixs1)
+    x2 = selectdim(x, ps.split_on_d, ps.ixs2)
+    fx1 = ps.fn1(x1)
+    fx2 = ps.fn2(x2)
+    return vcat(fx1, fx2)
+end
+
+Flux.@treelike PartialSplit    # new Flux calls this '@functor'. May need to replace.
+
+function Base.show(io::IO, l::PartialSplit)
+    l1 = l.fn1 == identity ? "" : format("ixs: {:s} => {:s}", string(l.ixs1), 
+        string(typeof(l.fn1)))
+    l2 = l.fn2 == identity ? "" : format("ixs: {:s} => {:s}", string(l.ixs2), 
+        string(typeof(l.fn2)))
+    out = length(l1) == 0 ? (length(l2) == 0 ? "" : l2) : (length(l2) == 0 ? l1 : l1 * "\n" * l2)
+    print(io, "PartialSplit(\n" * out * "\n)")
+end
 
 """
     MultiDense(Dense(in_1, out_1), Dense(in_2, out_2))
