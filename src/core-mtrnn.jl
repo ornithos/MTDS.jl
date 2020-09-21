@@ -1,12 +1,4 @@
 
-using Flux, ArgCheck, StatsBase, YAML
-using Flux: gate
-using Flux.Tracker: istracked
-
-using ..modelutils
-import ..modelutils: load!, randn_repar, mlp
-export load!
-
 const D_IM = 32
 
 
@@ -21,109 +13,104 @@ Flux.gate(x::AbstractArray{T,3}, h, n) where T = x[gate(h,n),:,:]
 Flux.gate(x::AbstractArray{T,4}, h, n) where T = x[gate(h,n),:,:,:]
 
 
-mutable struct MTGRU_NoU{F}
+mutable struct MTGRU{F}
+    d_input::Int
     N::Int
     G::F
 end
 
 """
-    MTGRU_NoU(N, G)
+    MTGRU(N, G)
 Multi-task GRU (Gated Recurrent Unit) model. Produces a GRU layer
 for each value of `z` ∈ Rᵈ which depends on the map `G` inside
-the MTGRU. N = out dimension, G: Rᵈ->R^{nLSTM}. z can be batched
+the MTGRU. d_input = in dimension, N = out dimension, G: Rᵈ->R^{nLSTM}. z can be batched
 as `z` ∈ R^{d × nbatch}.
-
-In order to simplify the implementation, there is no input depen-
-dent evolution (hence no `U`s, and hence no `Wi`). It is
-straight-forward to extend to this case, should it be reqd.
 """
-function (m::MTGRU_NoU)(z, h=nothing)
-    N, nB = m.N, size(z, 2)
+function (m::MTGRU)(z, h=nothing)
+    d, d_x, nB = m.N, m.d_input, size(z, 2)
     λ = m.G(z)
-    Wh = reshape(λ[1:N*N*3,:], N*3, N, nB)
-    b = λ[N*N*3+1:(N+1)*N*3, :]
+    Wh = reshape(λ[1:3*d*(d+d_x),:], d*3, d+d_x, nB)
+    b = λ[3*d*(d+d_x)+1:3*d*(d+d_x)+3*d, :]
     open_forget_gate = zero(b)   # no backprop, and hence not tracked, even if `b` is.
-    open_forget_gate[gate(N, 2), :] .= 1
+    open_forget_gate[gate(d, 2), :] .= 1
     b += open_forget_gate
     h = something(h, istracked(λ) ? Flux.param(zero(b)) : zero(b))
 
-    Flux.Recur(BatchedGRUCell_NoU(Wh, b, h))
+    Flux.Recur(BatchedGRUCell(Wh, b, h))
 end
 
-Flux.@treelike MTGRU_NoU
-Base.show(io::IO, l::MTGRU_NoU) =
-  print(io, "Multitask-GRU(", l.N, ", ", typeof(l.G), ", no inputs)")
+Flux.@treelike MTGRU
+Base.show(io::IO, l::MTGRU) =
+  print(io, "Multitask-GRU(state=", l.N, ", in=", l.d_input, ", ", typeof(l.G), ")")
 
 
 """
-  MTGRU_NoU_fixb(N, G, b)
+  MTGRU_fixb(N, G, b)
 Multi-task GRU (Gated Recurrent Unit) model. Produces a GRU layer
 for each value of `z` ∈ Rᵈ which depends on the map `G` inside
 the MTGRU. N = out dimension, G: Rᵈ->R^{nLSTM}. z can be batched
-as `z` ∈ R^{d × nbatch}. This version of the `MTGRU_NoU` does not
+as `z` ∈ R^{d × nbatch}. This version of the `MTGRU` does not
 adapt the offset vector `b` in the GRU, but learns a fixed value
 for all `z`.
-
-In order to simplify the implementation, there is no input depen-
-dent evolution (hence no `U`s, and hence no `Wi`). It is
-straight-forward to extend to this case, should it be reqd.
 """
-mutable struct MTGRU_NoU_fixb{F,V}
+mutable struct MTGRU_fixb{F,V}
+  d_input::Int
   N::Int
   G::F
   b::V
 end
 
 """
-  MTGRU_NoU_fixb_v2(N, G, b)
-As per `MTGRU_NoU_fixb`, except now only the *state* bias is fixed across all
-tasks. The gate biases depend on `z` just like the `MTGRU_NoU`.
+  MTGRU_fixb_v2(N, G, b)
+As per `MTGRU_fixb`, except now only the *state* bias is fixed across all
+tasks. The gate biases depend on `z` just like the `MTGRU`.
 """
-mutable struct MTGRU_NoU_fixb_v2{F,V}
+mutable struct MTGRU_fixb_v2{F,V}
+  d_input::Int
   N::Int
   G::F
   b::V
 end
 
-function (m::MTGRU_NoU_fixb)(z, h=nothing)
-  N, nB = m.N, size(z, 2)
+function (m::MTGRU_fixb)(z, h=nothing)
+  d, d_input, nB = m.N, m.d_input, size(z, 2)
   λ = m.G(z)
-  Wh = reshape(λ, N*3, N, nB)
+  Wh = reshape(λ, d*3, d+d_input, nB)
   b = m.b
   open_forget_gate = zero(b)   # no backprop, and hence not tracked, even if `b` is.
-  open_forget_gate[gate(N, 2), :] .= 1
+  open_forget_gate[gate(d, 2), :] .= 1
   b += open_forget_gate
   h = something(h, istracked(λ) ? Flux.param(zero(b)) : zero(b))
 
-  Flux.Recur(BatchedGRUCell_NoU(Wh, b, h))
+  Flux.Recur(BatchedGRUCell(Wh, b, h))
 end
 
-function (m::MTGRU_NoU_fixb_v2)(z, h=nothing)
-    N, nB = m.N, size(z, 2)
+function (m::MTGRU_fixb_v2)(z, h=nothing)
+    d, d_input, nB = m.N, m.d_input, size(z, 2)
     λ = m.G(z)
-    Wh = reshape(λ[1:N*N*3,:], N*3, N, nB)
+    Wh = reshape(λ[1:d*d*3,:], d*3, d+d_input, nB)
     gmove = Flux.has_cuarrays() && Tracker.data(z) isa Flux.CuArray ? gpu : identity
     expander = gmove(ones(eltype(Tracker.data(λ)), 1, nB))
-    b = vcat(λ[N*N*3+1:N*N*3+N*2, :], m.b * expander)
+    b = vcat(λ[d*d*3+1:d*d*3+d*2, :], m.b * expander)
     open_forget_gate = zero(b)
-    open_forget_gate[gate(N, 2), :] .= 1
+    open_forget_gate[gate(d, 2), :] .= 1
     b += open_forget_gate
     h = something(h, istracked(λ) ? Flux.param(zero(b)) : zero(b))
 
-    Flux.Recur(BatchedGRUCell_NoU(Wh, b, h))
+    Flux.Recur(BatchedGRUCell(Wh, b, h))
 end
 
-Flux.@treelike MTGRU_NoU_fixb
-Base.show(io::IO, l::MTGRU_NoU_fixb) =
-print(io, "Multitask-GRU-fixb(", l.N, ", ", typeof(l.G), ", bias vector: ", typeof(l.b), "; no inputs)")
+Flux.@treelike MTGRU_fixb
+Base.show(io::IO, l::MTGRU_fixb) =
+print(io, "Multitask-GRU-fixb(", l.N, ", ", typeof(l.G), ", bias vector: ", typeof(l.b), ")")
 
-Flux.@treelike MTGRU_NoU_fixb_v2
-Base.show(io::IO, l::MTGRU_NoU_fixb_v2) =
-print(io, "Multitask-GRU-fixb_v2(", l.N, ", ", typeof(l.G), ", bias vector (state only): ", typeof(l.b), "; no inputs)")
+Flux.@treelike MTGRU_fixb_v2
+Base.show(io::IO, l::MTGRU_fixb_v2) =
+print(io, "Multitask-GRU-fixb_v2(", l.N, ", ", typeof(l.G), ", bias vector (state only): ", typeof(l.b), ")")
 
 
 """
-    BatchedGRUCell_NoU(Wh, b, h)
+    BatchedGRUCell(Wh, b, h)
 Multi-task GRU Cell (which takes no input).
 `Wh`, `b`, `h` are the (concatenated) transformation matrices,
 offsets, and initial hidden state respectively.
@@ -133,27 +120,29 @@ step evolution of the hidden state and return the current value.
 The cell is implemented in batch-mode, and the final dimension of
 each quantity is the batch index.
 """
-mutable struct BatchedGRUCell_NoU{A,W}
+mutable struct BatchedGRUCell{A,W}
     Wh::A
     b::W
     h::W
 end
 
 
-function (m::BatchedGRUCell_NoU)(h, x=nothing)
-  b, o = m.b, size(h, 1)
-  gh = batch_matvec(m.Wh, h)
+(m::BatchedGRUCell)(h, x) = _batchgrucell(m, h, x)
+
+function _batchgrucell(m::BatchedGRUCell, h::AbstractArray, u::AbstractArray)
+  b, o = m.b, size(m.Wh, 1) ÷ 3
+  gh = batch_matvec(m.Wh, vcat(h, u))
   r = σ.(gate(gh, o, 1) .+ gate(b, o, 1))
   z = σ.(gate(gh, o, 2) .+ gate(b, o, 2))
-  h̃ = tanh.(r .* gate(gh, o, 3) .+ gate(b, o, 3))
+  h̃ = tanh.(r .* gate(gh, o, 3) .+ gate(b, o, 3)) 
   h′ = (1 .- z).*h̃ .+ z.*h
   return h′, h′
 end
 
-Flux.@treelike BatchedGRUCell_NoU
-Base.show(io::IO, l::BatchedGRUCell_NoU) =
-  print(io, "Batched GRU Cell(dim=", size(l.Wh,2), ", batch=", size(l.Wh,3), ", no inputs)")
-Flux.hidden(m::BatchedGRUCell_NoU) = m.h
+Flux.@treelike BatchedGRUCell
+Base.show(io::IO, l::BatchedGRUCell) =
+  print(io, "Batched GRU Cell(dim=", size(l.Wh,2), ", batch=", size(l.Wh,3), ")")
+Flux.hidden(m::BatchedGRUCell) = m.h
 
 
 
@@ -293,7 +282,7 @@ Flux.hidden(m::BatchedGRUCell_NoU) = m.h
 #     model_out = m(x0, vcat(z, c); T_steps=T_steps)
 #     recon = -nllh(M, model_out, y)
 #
-#     # ⇒ Initially no KL (Hard EM), and then an annealing sched. cf. Bowman et al. etc?
+#     # ⇒ Initially KL (Hard EM), and then an annealing sched. cf. Bowman et al. etc?
 #     kl = stoch ? _kl_penalty_stoch(β, μs, σs) : _kl_penalty_deterministic(β, μs)
 #     kl = kl * kl_coeff
 #

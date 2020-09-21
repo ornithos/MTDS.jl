@@ -4,7 +4,8 @@ using LinearAlgebra, StatsBase, Distributions
 using Flux   # must be Flux@0.90
 using BSON, YAML, ArgCheck, Dates, Formatting
 
-export create_mtlds, MTLDS_variational, create_mtpd, MTPD_variational
+export create_mtlds, MTLDS_variational, create_mtpd, MTPD_variational, create_mtgru, 
+       MTGRU_variational
 
 include("util.jl")
 include("modelutils.jl")
@@ -22,13 +23,14 @@ module model
 
     import ..save, ..load!
     import ..modelutils: randn_repar, posterior_sample, LookupTable, PartialSplit, MultiDense, mlp, 
-        get_final_layer_dim, get_first_layer_dim
+        get_final_layer_dim, get_first_layer_dim, BRNNenc, save, load!
     using ..util
     import ..util: unsqueeze, get_strtype_wo_params, MaskedArray, stacked
 
     export load!, forward, encode, reconstruct, elbo, elbo_w_kl,
            MTLDS_variational, create_mtlds, 
-           MTPD_variational, create_mtpd
+           MTPD_variational, create_mtpd,
+           MTGRU_variational, create_mtgru
            
     # Supertype
     include("super.jl")
@@ -38,8 +40,8 @@ module model
     include("subtype-lds.jl")
     include("subtype-mtpd.jl")
     include("objective.jl")
-    # include("core-mtrnn.jl")
-    # include("mtrnn-dblpend.jl")   # => refactor later
+    include("core-mtrnn.jl")
+    include("subtype-rnn.jl") 
 end
 
 using .model
