@@ -43,13 +43,13 @@ function _gauss_nllh_batchavg(y::MaskedArray{T,3}, mu::AbstractArray{T,3}, logst
     (sum(Δ.*Δ) + avg_nonzero*sum(logstd)) / (2*n_b)   # ignoring -0.5tT*n_y*log(2π)
 end
 
-function _gauss_nllh_individual_bybatch(y::MaskedArray{T,3}, mu::AbstractArray{T,2}, logstd::AbstractArray; dims::Int=0) where T
+function _gauss_nllh_individual_bybatch(y::MaskedArray{T,3}, mu::AbstractArray{T,N}, logstd::AbstractArray; dims::Int=0) where {T, N}
     n_y, tT, n_b = size(y)
-    Δ = (y.data - mu) ./ exp.(logstd)
+    Δ = (y.data .- mu) ./ exp.(logstd)
     Δ = Δ .* y.mask
     num_nonzero = sum(y.mask, dims=(1,2))[:] / n_y
     # length(logstd) is either 1 or n_y depending on constructor
-    (sum(Δ.*Δ; dims=(1,2))[:] + num_nonzero*mean(logstd)) / 2  # ignoring -0.5tT*n_y*log(2π)
+    (sum(Δ.*Δ; dims=(1,2))[:] .+ num_nonzero*mean(logstd)) / 2  # ignoring -0.5tT*n_y*log(2π)
 end
 
 
@@ -313,6 +313,8 @@ function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=siz
                 kl_coeff = β_kl * opt_pars.kl_pct,
                 stochastic = !is_hard_em,
                 logstd_prior = logstd_prior)
+            
+            # loss += 0.01*sum(abs, m.hphi.W)   # regularization of MT network
 
             # add any new VI posteriors (never before seen sequences) into Params
             is_amortized(m) || (ps = Flux.params(ps, Flux.params(m.mt_enc)));

@@ -329,6 +329,7 @@ end
 
 # (Possibly) useful ops re applying the mask
 as_nan(x::MaskedArray{T,N}) where {T,N} = replace(_as_missing(x), missing=>T(NaN))
+rm_nan(x::MaskedArray{T,N}) where {T,N} = collect(skipmissing(_as_missing(x)))
 zero_maskvals(x::MaskedArray, y::AbstractArray) = y .* mask(x)
 zero_maskvals(x::MaskedArray) = zero_maskvals(x, data(x))
 apply_mask(x::MaskedArray, y::AbstractArray) = MaskedArray(zero_maskvals(x, y), mask(x))
@@ -338,6 +339,7 @@ stacked(x::MaskedArray) = vcat(data(x), mask(x))
 stacked(x::MaskedArray, I...) = vcat(data(x)[I...], mask(x)[I...])
 hstacked(x::MaskedArray) = hcat(data(x), mask(x))
 hstacked(x::MaskedArray, I...) = hcat(data(x)[I...], mask(x)[I...])
+const vstacked = stacked
 
 # # For vcat in encode method
 # Base.vcat(x::MaskedArray, y::MaskedArray) = MaskedArray(vcat(data(x), data(y)), 
@@ -357,8 +359,8 @@ Base.:*(x::MaskedArray, y::AbstractArray) = MaskedArray(data(x) * y, mask(x))
 Base.:*(x::AbstractArray, y::MaskedArray) = MaskedArray(x * data(y), mask(y))
 Base.:/(x::MaskedArray, y::AbstractArray) = MaskedArray(data(x) / y, mask(x))
 Base.:/(x::AbstractArray, y::MaskedArray) = MaskedArray(x / data(y), mask(y))
-Base.sum(x::MaskedArray) = sum(data(x))
-Base.sum(x::MaskedArray; dims) = sum(data(x), dims=dims)
+Base.sum(x::MaskedArray) = sum(zero_maskvals(x))
+Base.sum(x::MaskedArray; dims) = sum(zero_maskvals(x), dims=dims)
 StatsBase.mean(x::MaskedArray; dims) = sum(x, dims=dims) ./ sum(mask(x), dims=dims)
 function StatsBase.var(x::MaskedArray; dims)
     mu = mean(x, dims=dims)

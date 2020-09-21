@@ -102,7 +102,8 @@ end
 forward(m::MTPD_variational, z, U; T_steps=size(U, 2)) = forward(m, nothing, z, U; T_steps=T_steps)
 function forward(m::MTPD_variational, x0, z::AbstractVecOrMat{T}, U::AbstractArray{T}; T_steps=size(U, 2)) where T <: AbstractFloat
     # note that T_steps is currently ignored (this is no great issue).
-    !(x0 === nothing) && @warn "MTPD_variational currently doesn't accept x0 -- fixed at 0. Ignoring..."
+    !(x0 === nothing) && @warn "MTPD_variational currently doesn't accept x0 -- fixed at 0." * 
+        "Ignoring..."
     @argcheck size(z, 2) == size(U, 3)
     θ = m.hphi(z)
     # currently don't modulate the initial state.

@@ -3,9 +3,9 @@
 """
     batch_matvec(A::Tensor, X::Matrix)
 
-for A ∈ ℝ^{n × m × d}, X ∈ ℝ^{n × d}. Performs ``n`` matrix-vec multiplications
+for A ∈ ℝ^{m × d × n}, X ∈ ℝ^{d × n}. Performs ``n`` matrix-vec multiplications
 
-    A[i,:,:] * X[i,:]
+    A[:,:,i] * X[:,i]
 
 for ``i \\in 1,\\ldots,n``. This is performed via expansion of `X` and can be
 efficiently evaluated using BLAS operations, which (I have assumed!) will often
@@ -35,6 +35,10 @@ batch_matmul(A::AbstractArray{T,2}, X::AbstractArray{T,3}) where T =
 
 ensure_matrix(x::AbstractMatrix) = x
 ensure_matrix(x::AbstractVector) = unsqueeze(x, 2)
+
+ensure_tensor(x::AbstractMatrix) = unsqueeze(x, 3)
+ensure_tensor(x::AbstractVector) = reshape(x, length(x), 1, 1)
+ensure_tensor(x::AbstractArray{T,3}) where T = x
 
 eye(d) = Matrix(I, d, d)
 
