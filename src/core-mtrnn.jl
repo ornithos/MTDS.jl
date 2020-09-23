@@ -145,6 +145,100 @@ Base.show(io::IO, l::BatchedGRUCell) =
 Flux.hidden(m::BatchedGRUCell) = m.h
 
 
+mutable struct _MTDense{A,B,F}
+  W::A
+  B::B
+  σ::F
+end
+
+function _MTDense(k::Integer, in::Integer, out::Integer, σ = identity;
+                  initW = Flux.glorot_uniform, initb = zeros)
+    return _MTDense(Flux.param(cat([initW(out, in) for _ in 1:k]..., dims=3)), 
+                   Flux.param(initb(out)), σ)
+end
+
+"""
+  _MTDense(Z, X)
+Multi-task Dense Layer. Takes a matrix Z and 3-D tensor X where the last dim corresponds to the 
+batch in both cases. Each column of Z constructs a standard `Dense` layer, and hence each member
+of the batch of X attains a different Dense layer. This is an all-in-one approach, but it seems
+like a generator approach will play more nicely with the existing code.
+
+Constructor: _MTDense(k, in, out, σ=identity; initW, initb)
+"""
+function (m::_MTDense)(Z::AbstractMatrix{T}, X::AbstractArray{T,3}) where T
+    Ŷ = sum(reshape(m.W, size(m.W)..., 1, 1) 
+            .* reshape(Z, 1, 1, size(Z)...)
+            .* reshape(X, 1, size(X, 1), 1, size(X,2), size(X, 3)), 
+            dims=(2,3)) |> x -> dropdims(x, dims=(2,3))
+    bias = sum(unsqueeze(m.B, 3) .* unsqueeze(Z, 1), dims=2)
+    return Ŷ .+ bias
+end
+
+Flux.@treelike _MTDense
+Base.show(io::IO, l::_MTDense) = 
+  print(io, "All-in-one MTDense(k=", size(l.B, 2), ", W size=", size(l.W)[1:2], ", σ=", l.σ, ")")
+
+
+
+mutable struct MTDenseGenerator{A <: AbstractArray, B <: AbstractArray, F}
+  W::A
+  B::B
+  σ::F
+end
+
+function MTDenseGenerator(k::Integer, in::Integer, out::Integer, σ = identity;
+                          initW = Flux.glorot_uniform, initb = zeros)
+    return MTDenseGenerator(Flux.param(cat([initW(out, in) for _ in 1:k]..., dims=3)), 
+    Flux.param(f32(initb(out, k))), σ)
+end
+
+Flux.@treelike MTDenseGenerator
+Base.show(io::IO, l::MTDenseGenerator) =
+  print(io, "MTDenseGenerator(k=", size(l.B, 2), ", W size=", size(l.W)[1:2], ", σ=", l.σ, ")")
+
+"""
+  MTDenseGenerator(Z)
+Batched Dense layer generator. Each column of the matrix Z results in a different `Dense` layer;
+the resulting set of `Dense` layers are batched-up and served as a `BatchedDense` object. (See the
+docstrings of these for more details).
+
+Constructor: _MTDense(k, in, out, σ=identity; initW, initb)
+"""
+function (m::MTDenseGenerator)(Z::AbstractMatrix{T}) where T
+    Ŵ = sum(unsqueeze(m.W, 4) .* reshape(Z, 1, 1, size(Z)...), dims=3) |> x->dropdims(x, dims=3)
+    B̂ = sum(unsqueeze(m.B, 3) .* unsqueeze(Z, 1), dims=2)
+    return BatchedDense(Ŵ, B̂, σ)
+end
+
+
+mutable struct BatchedDense{A,B,F}
+  W::A
+  B::B
+  σ::F
+end
+
+"""
+  BatchedDense(Z)
+The result of a `MTDenseGenerator` object. Takes a 3-D tensor X for dimensions (n_x, n_t, n_b), 
+i.e. dim(x), # timepoints, and batch size respectively, and applies a different Dense layer to the
+each member of the batch. Returns a tensor of size (n_y, n_t, n_b)
+
+Constructor: (use `MTDenseGenerator`)
+"""
+function (m::BatchedDense)(X::AbstractArray{T,3}) where T
+    A = sum(unsqueeze(m.W, 3) .* unsqueeze(X, 1), dims=2) |> x -> dropdims(x, dims=2)
+    return m.σ.(A .+ m.B)
+end
+
+function (m::BatchedDense)(X::AbstractArray{T,2}) where T
+    return dropdims(m(unsqueeze(X, 2)), dims=2)
+end
+
+Flux.@treelike BatchedDense
+Base.show(io::IO, l::BatchedDense) =
+  print(io, "BatchedDense(k=", size(l.B, 2), ", W size=", size(l.W)[1:2], ", σ=", l.σ, ")")
+
 
 ################################################################################
 ##                                                                            ##

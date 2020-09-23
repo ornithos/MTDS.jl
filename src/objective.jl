@@ -71,9 +71,9 @@ end
 
 
 function elbo_w_kl(m::MTDSModel, y::AbstractArray, u::AbstractArray, data_enc::AbstractArray;
-    kl_coeff=1.0f0, stochastic=true, logstd_prior=nothing)
+    kl_coeff=1.0f0, stochastic=true, logstd_prior=nothing, T_enc=size(u, 2))
     nbatch = size(y,3)
-    zsmp, zμ, zσ = encode(m, data_enc; stochastic=stochastic)[1]
+    zsmp, zμ, zσ = encode(m, data_enc; stochastic=stochastic, T_enc=T_enc)[1]
     ŷ = m(zsmp, u)
     nllh = _gauss_nllh_batchavg(y, ŷ, m.logstd)
     kl = stochastic * kl_coeff * (-0.5f0 * sum(1 .+ 2*log.(zσ) - zμ.*zμ - zσ.*zσ)) / nbatch
@@ -86,16 +86,17 @@ function elbo_w_kl(m::MTDSModel, y::AbstractArray, u::AbstractArray, data_enc::A
 end
 
 elbo_w_kl(m::MTDSModel, y::AbstractArray, u::AbstractArray; kl_coeff=1.0f0, stochastic=true,
-        logstd_prior=nothing) = (elbo_w_kl(m, y, u, vcat(y, u); kl_coeff=kl_coeff,
-        stochastic=stochastic, logstd_prior=logstd_prior))
+        logstd_prior=nothing, T_enc=size(u,2)) = (elbo_w_kl(m, y, u, vcat(y, u); kl_coeff=kl_coeff,
+        stochastic=stochastic, logstd_prior=logstd_prior, T_enc=T_enc))
 
 elbo_w_kl(m::MTDSModel, y::MaskedArray, u::AbstractArray; kl_coeff=1.0f0, stochastic=true,
-        logstd_prior=nothing) = (elbo_w_kl(m, y, u, vcat(stacked(y), u); kl_coeff=kl_coeff, 
-        stochastic=stochastic, logstd_prior=logstd_prior))
+        logstd_prior=nothing, T_enc=size(u,2)) = (elbo_w_kl(m, y, u, vcat(stacked(y), u); 
+        kl_coeff=kl_coeff, stochastic=stochastic, logstd_prior=logstd_prior, T_enc=T_enc))
 
 elbo_w_kl(m::MTDSModel, y::AbstractArray, u::MaskedArray; kl_coeff=1.0f0, stochastic=true,
-    logstd_prior=nothing) = error("ELBO not implemented yet for when `u` has missing values." *
-    " No current models accept missing inputs -- try passing through `stacked(u)` as inputs.")
+    logstd_prior=nothing, T_enc=size(u,2)) = error("ELBO not implemented yet for when `u` has "* 
+    "missing values. No current models accept missing inputs -- try passing through `stacked(u)` "*
+    "as inputs.")
 
 """
     elbo(m::MTLDS_variational, y, u; kl_coeff=1.0f0, stochastic=true, logstd_prior=nothing)
@@ -110,8 +111,9 @@ for MTLDS with emissions `y` and inputs `u`.
 It is sometimes useful to monitor the two terms (reconstruction and KL) separately.
 In this case, the function `elbo_w_kl` (same arguments) returns a tuple of (elbo, kl).
 """
-elbo(m::MTDSModel, y, u; kl_coeff=1.0f0, stochastic=true, logstd_prior=nothing) =
-    elbo_w_kl(m, y, u; kl_coeff=kl_coeff, stochastic=stochastic, logstd_prior=logstd_prior)[1]
+elbo(m::MTDSModel, y, u; kl_coeff=1.0f0, stochastic=true, logstd_prior=nothing, T_enc=size(u,2)) =
+    elbo_w_kl(m, y, u; kl_coeff=kl_coeff, stochastic=stochastic, logstd_prior=logstd_prior, 
+              T_enc=T_enc)[1]
 
 
 # ======== Objective function: Monte Carlo Objective =============================
@@ -292,9 +294,13 @@ function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=siz
         T_enc=tT, ps=Flux.params(m), verbose=true, logstd_prior=nothing)
     has_inputs = check_inputs_outputs(m, Ys, Us)
 
+    # check if used default params
+    # default_ps = length(setdiff(collect(Flux.params(m)), collect(Flux.params(m)))) == 0
+    # !default_ps && @warn "If you are using 'LookupTable', any created parameters will not be tuned"*
+    #                      "during this process. These can be added the next time you train."
     # useful shorthand
     β_kl = opt_pars.kl_mult
-    N = size(Ys, 3)
+    n_y, tT, N = size(Ys)
     Nb = opt_pars.nbatch
 
     history = ones(nepochs) * NaN
@@ -312,12 +318,10 @@ function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=siz
             loss, kl = elbo_w_kl(m, y, u;
                 kl_coeff = β_kl * opt_pars.kl_pct,
                 stochastic = !is_hard_em,
-                logstd_prior = logstd_prior)
+                logstd_prior = logstd_prior,
+                T_enc=T_enc)
             
             # loss += 0.01*sum(abs, m.hphi.W)   # regularization of MT network
-
-            # add any new VI posteriors (never before seen sequences) into Params
-            is_amortized(m) || (ps = Flux.params(ps, Flux.params(m.mt_enc)));
 
             # update KL annealing
             is_hard_em && (opt_pars.kl_pct = min(opt_pars.kl_pct + opt_pars.kl_anneal, 1.0f0))
@@ -330,6 +334,25 @@ function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=siz
             for (p_i, p) in enumerate(ps)
                 Tracker.update!(opt_pars.opt, p, Tracker.grad(p))
             end
+            
+            # Update posterior params if doing traditional VI without amortization
+            if !is_amortized(m)
+                posterior_ps = []
+                for j in 1:Nb
+                    (zsmp, zμ, zσ_), (x0smp, x0μ, x0σ_) = encode(m, y[:,:,j], u[:,:,j], T_enc=T_enc)
+                    # display(zμ)
+                    # display(zσ_.tracker.f)
+                    push!(posterior_ps, zμ)
+                    !(x0μ === nothing) && push!(posterior_ps, x0μ)
+                    push!(posterior_ps, zσ_.tracker.f.func.args[1])
+                    !(x0σ_ === nothing) && push!(posterior_ps, x0σ_.tracker.f.func.args[1])
+                end
+                # display(sum(abs, [sum(abs, Tracker.grad(p)) for p in posterior_ps]))
+                for p in posterior_ps
+                    Tracker.update!(opt_pars.opt, p, Tracker.grad(p))
+                end
+            end
+
         end
         opt_pars.opt.eta *= opt_pars.lr_decay
         opt_pars.hard_em_epochs = max(opt_pars.hard_em_epochs -1, 0)

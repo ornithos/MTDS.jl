@@ -5,8 +5,8 @@ struct MTGRU_Double end
     MTGRU_variational(enc_tform, init_enc, init_post, mt_enc, mt_post,
         x0decoder, mtbias_deocder, gen_model, d_y, mtbias_only)
 
-A sequence-to-sequence model 𝒴→𝒴 which imbibes `T_enc` steps of the sequence,
-and predicts `T_steps` (including the original `T_enc`), but unlike the
+A sequence-to-sequence model 𝒴→𝒴 which imbibes `T_steps` steps of the sequence,
+and predicts `T_steps` (including the original `T_steps`), but unlike the
 `Seq2SeqModel`, the `MTSeqModel_Pred` can *modulate* its prediction based on
 hierarchical 'multi-task' variables. The `Pred` suffix refers to the function
 of the encoders. I had previously made the `E3` suffix version (see docstring),
@@ -54,7 +54,7 @@ Options include `T_enc`, `T_steps` (already discussed), `reset` (which performs
 a state reset before execution; true by default), and `stoch`, whether to
 randomly sample the latent state, or use the state mean (default true).
 """
-struct MTGRU_variational{U,A,B,V,W,S,N,M}
+struct MTGRU_variational{U,A,B,V,W,S,N,M,T} <: MTDSModel
     enc_tform::U
     init_enc::A
     init_post::B
@@ -65,6 +65,7 @@ struct MTGRU_variational{U,A,B,V,W,S,N,M}
     generator::S
     dec_tform::N
     model_type::M
+    logstd::T
     d::Int
     d_mt::Int
     mtbias_only::Bool
@@ -73,7 +74,7 @@ end
 
 # Model utils
 Flux.@treelike MTGRU_variational
-model_type(m::MTGRU_variational{U,A,B,V,W,S,N,M}) where {U,A,B,V,W,S,N,M} = M
+model_type(m::MTGRU_variational{U,A,B,V,W,S,N,M,T}) where {U,A,B,V,W,S,N,M,T} = M
 
 unpack(m::MTGRU_variational) = Flux.children(m)[1:9] # unpack struct; exclude `d`, `mtbias_only`.
 unpack_inference(m::MTGRU_variational) = Flux.children(m)[1:5]
@@ -99,7 +100,7 @@ end
 
 function encode(m::MTGRU_variational, Y::AbstractArray{T}, U::AbstractArray{T}; T_enc=size(Y, 2), 
                 stochastic=true) where T
-    encode(m, vcat(U, Y); T_enc=T_enc, stochastic=stochastic)
+    encode(m, vcat(Y, U); T_enc=T_enc, stochastic=stochastic)
 end
 
 function encode(m::MTGRU_variational, data_enc::AbstractArray; T_enc=size(data_enc,2), 
@@ -118,6 +119,8 @@ function encode(m::MTGRU_variational, data_enc::AbstractArray; T_enc=size(data_e
 end
 
 
+is_amortized(m::MTGRU_variational{U,A,B,V,W,S,N,M,T}) where {A <: LookupTable, U,B,V,W,S,N,M,T} = false
+
 ################################################################################
 ##                                                                            ##
 ##                                Forward Model                               ##
@@ -126,7 +129,7 @@ end
 
 function forward(m::MTGRU_variational, z, U; T_steps=size(U, 2))
     n_u, n_t, n_b = size(U)
-    forward(m, zeros(eltype(U), m.d_mt, n_b), z, U; T_steps=T_steps)
+    forward(m, zeros(eltype(U), size(m.x0decoder.W, 2), n_b), z, U; T_steps=T_steps)
 end
 
 function forward(m::MTGRU_variational, x0::AbstractVecOrMat{T}, z::AbstractVecOrMat{T},
@@ -147,24 +150,32 @@ end
     function _forward_given_latent(m::MTGRU_variational, x0::AbstractMatrix, z::AbstractMatrix,
                                 U::AbstractArray{T,3}, T_steps::Int) where T
         x0decoder, mtbias_decoder, gen_model, dec_tform = unpack_generative(m)
+        
+        if dec_tform.layers[2] isa MTDenseGenerator
+            _mtdec = dec_tform.layers[2](z)
+            decoder(x) = let l1=dec_tform.layers[1](x); _mtdec(l1) + dec_tform.layers[3](l1); end
+        else
+            decoder = dec_tform
+        end
 
         if m.mtbias_only
             gen_model.state = x0decoder(x0)
             mtbias = mtbias_decoder(z)   # if linear, this is just the identity ∵ GRUCell.Wi
-            yhat_ts = [unsqueeze(dec_tform(gen_model(mtbias)),2) for t in 1:T_steps]
+            yhat_ts = [unsqueeze(decoder(gen_model(mtbias)),2) for t in 1:T_steps]
         else
             # Get GRU models from samples from the MT GRU model
             posterior_grus = gen_model(z) # output: BatchedGRU (def. above)
             # Set state (batch-wise) to x0 sample
             posterior_grus.state = x0decoder(x0)  # 2×linear d_x0 × nbatch → d_x × nbatch
             # Run generative model
-            yhat_ts = [unsqueeze(dec_tform(posterior_grus(U[:,tt,:])),2) for tt in 1:T_steps]
+            
+            yhat_ts = [unsqueeze(decoder(posterior_grus(U[:,tt,:])),2) for tt in 1:T_steps]
         end
         return hcat(yhat_ts...)
     end
 
 function (m::MTGRU_variational)(x0::AbstractVecOrMat, z::AbstractVecOrMat, U::AbstractArray;
-          T_steps=70)
+          T_steps=size(U,2))
     _forward_given_latent(m, x0, z, U, T_steps)
 end
 
@@ -196,7 +207,7 @@ end
 
 function create_mtgru(d_u, d_x, d_y, d_enc_state, d_enc_x0, d_mt; encoder=:GRU,
     out_heads=1, d_hidden=d_x, mtbias_only=false, d_hidden_mt=32, mt_is_linear=true, 
-    fixb=false, fixb_version=nothing)
+    fixb=false, fixb_version=nothing, spherical_var=false, lkp_init_std_logit=-2f0)
 
     @argcheck out_heads in 1:2
     @assert !(fixb && mtbias_only) "cannot do mtbias AND fix 'b'"
@@ -216,8 +227,9 @@ function create_mtgru(d_u, d_x, d_y, d_enc_state, d_enc_x0, d_mt; encoder=:GRU,
     @argcheck encoder in [:LSTM, :GRU, :Bidirectional, :LookupTable]
 
     if encoder == :LookupTable
-        init_enc = LookupTable(d_enc_x0, 0.01f0, -1f0)  # 2/3: initial posterior noise for mu/logstd
-        mt_enc = LookupTable(d_mt, 0.01f0, -1f0)
+        # args 2/3: initial posterior noise for mu/logstd
+        init_enc = LookupTable(d_enc_x0, 0.01f0, lkp_init_std_logit)  
+        mt_enc = LookupTable(d_mt, 0.01f0, lkp_init_std_logit)
     else
         rnn_constructor = Dict(:LSTM=>LSTM, :GRU=>GRU, :Bidirectional=>BRNNenc)[encoder]
         init_enc = rnn_constructor(d_rnn_in, d_enc_state)
@@ -264,13 +276,24 @@ function create_mtgru(d_u, d_x, d_y, d_enc_state, d_enc_x0, d_mt; encoder=:GRU,
     end
 
     if out_heads == 1
-        decoder = Chain(Dense(d_x, d_hidden, relu), Dense(d_hidden, d_y, identity))
+        # decoder = Chain(Dense(d_x, d_hidden, relu), Dense(d_hidden, d_y, identity))
+        decoder = Chain(Dense(d_x, d_hidden, relu), 
+                        MTDenseGenerator(d_mt, d_hidden, d_y, identity),
+                        Dense(d_hidden, d_y, identity))   # this is super hacky -- see forward pass
     elseif out_heads == 2
-        decoder = Chain(Dense(d_x, d_hidden, relu), MultiDense(Dense(d_hidden, d_y, identity), Dense(d_hidden, d_y, identity)))
+        @error "out_heads=2 reqs a little re-engineering of the forward pass due to the MTDense"*
+        " layer. Really we need to make a generator for the whole Chain of the decoder, not simply"*
+        " the MTDense part."
+        decoder = Chain(Dense(d_x, d_hidden, relu), MultiDense(
+            MTDenseGenerator(d_mt, d_hidden, d_y, identity), 
+            MTDenseGenerator(d_mt, d_hidden, d_y, identity)))
     end
 
+    emission_std = spherical_var ? Tracker.param([0.0f0]) : Tracker.param(zeros(Float32, d_y))
+
     m = MTGRU_variational(tform_enc, init_enc, init_post, mt_enc, mt_post,
-        x0decoder, mtbias_decoder, gen_rnn, decoder, model_type, d_y, d_mt, mtbias_only)
+        x0decoder, mtbias_decoder, gen_rnn, decoder, model_type, emission_std, 
+        d_y, d_mt, mtbias_only)
 
     return m
 end
@@ -325,3 +348,23 @@ end
 #     "model_def"=>mtmodel.create_model_opt_dict(64, 6, 4, 40, 2; encoder=:GRU, cnn=true, d_hidden=128,
 #     model_purpose=:pred, mtbias_only=false, decoder_fudge_layer=true, fixb=true, fixb_version=2)
 # ))
+
+
+# overloading elbo_w_kl as we need to use both z and x0 latent vars
+function elbo_w_kl(m::MTGRU_variational, y::AbstractArray, u::AbstractArray, 
+                   data_enc::AbstractArray; kl_coeff=1.0f0, stochastic=true, logstd_prior=nothing, 
+                   T_enc=size(u, 2))
+    nbatch = size(y,3)
+    zstuff, x0stuff = encode(m, data_enc; stochastic=stochastic, T_enc=T_enc)
+    zsmp, zμ, zσ = zstuff
+    x0smp, x0μ, x0σ = x0stuff
+    ŷ = m(x0smp, zsmp, u)
+    nllh = _gauss_nllh_batchavg(y, ŷ, m.logstd)
+    kl = stochastic * kl_coeff * (-0.5f0 * sum(1 .+ 2*log.(zσ) - zμ.*zμ - zσ.*zσ)) / nbatch
+    kl += stochastic * kl_coeff * (-0.5f0 * sum(1 .+ 2*log.(x0σ) - x0μ.*x0μ - x0σ.*x0σ)) / nbatch
+    # Prior regularization of emission stdev.
+    if !(logstd_prior === nothing)
+        nllh += sum(x->x^2, (m.logstd .- logstd_prior[1])./logstd_prior[2])/2
+    end
+    nllh + kl, kl
+end

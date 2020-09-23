@@ -5,12 +5,12 @@ is_amortized(m::MTDSModel) = true   # assumption is that default setting uses en
 
 forward(m::MTDSModel, x0, z, U; T_steps=size(U, 2)) =
     error(format("Not Implemented Yet: {:s}. Please implement a forward proc (given z).", string(typeof(m))))
-encode(m::MTDSModel, Y, U; T_steps=size(Y, 2), stochastic=true) =
+encode(m::MTDSModel, Y, U; kl_coeff=1f0, stochastic=true, logstd_prior=nothing, T_enc=size(U, 2)) =
     error(format("Not Implemented Yet: {:s}. Please implement an encode proc.", string(typeof(m))))
 
-function reconstruct(m::MTDSModel, Y, U; T_steps=size(Y, 2), enc_steps=T_steps, stochastic=true)
+function reconstruct(m::MTDSModel, Y, U; T_steps=size(Y, 2), T_enc=T_steps, stochastic=true)
     @argcheck size(Y,2) == size(U,2)
-    (smpz, μ_z, σ_z), (smpx0, μ_x0, σ_x0) = encode(m, Y, U; T_steps=enc_steps, stochastic=stochastic)
+    (smpz, μ_z, σ_z), (smpx0, μ_x0, σ_x0) = encode(m, Y, U; T_enc=T_enc, stochastic=stochastic)
     forward(m, smpx0, smpz, U; T_steps=T_steps)
 end
 

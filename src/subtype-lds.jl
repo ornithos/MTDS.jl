@@ -135,12 +135,12 @@ end
     end
 
 
-encode(m::MTLDS_variational, Y::AbstractArray{T}, U::AbstractArray{T}; T_steps=size(Y, 2), 
-    stochastic=true) where T = encode(m, vcat(U, Y); T_steps=T_steps, stochastic=stochastic)
+encode(m::MTLDS_variational, Y::AbstractArray{T}, U::AbstractArray{T}; T_enc=size(Y, 2), 
+    stochastic=true) where T = encode(m, vcat(Y, U); T_enc=T_enc, stochastic=stochastic)
 
-function encode(m::MTLDS_variational, data_enc::AbstractArray; T_steps=size(data_enc, 2), stochastic=true)
+function encode(m::MTLDS_variational, data_enc::AbstractArray; T_enc=size(data_enc, 2), stochastic=true)
     m.flag_mt_x0 && error("Unable to modulate x0 currently. Change encoder code, and `_mtlds_model_forward`.")
-    smpz, μ_z, σ_z = posterior_sample(m.mt_enc, m.mt_post, data_enc, size(data_enc, 2), stochastic)
+    smpz, μ_z, σ_z = posterior_sample(m.mt_enc, m.mt_post, data_enc, T_enc, stochastic)
     return (smpz, μ_z, σ_z), (nothing, nothing, nothing)   # second tuple is for if x0 has separate encoder.
 end
 

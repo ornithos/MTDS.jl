@@ -74,7 +74,8 @@ end
 Flux.children(m::Iterators.Flatten) = m
 Flux.children(m::Flux.Params) = m        # params is currently not idempotent: this fixes it. 
                                          # Not sure if unintended consequences though?
-Flux.params(lkp::LookupTable) = Flux.params(Iterators.Flatten(lkp.lkp.vals[findall(lkp.lkp.slots .== 1)]))
+Flux.children(lkp::LookupTable) = () #Iterators.Flatten(lkp.lkp.vals[findall(lkp.lkp.slots .== 1)])
+Flux.params(lkp::LookupTable) = Flux.params(Flux.children(lkp))
 
 
 """
