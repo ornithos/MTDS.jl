@@ -1,7 +1,10 @@
 abstract type MTDSModel end
 
 # Common interface
-is_amortized(m::MTDSModel) = true   # assumption is that default setting uses encoder.
+is_amortized(m::MTDSModel) = error(format("It's not known whether {:s} uses amortized inference. "*
+ "Please implement `is_amortized(m)` for this type.", get_strtype_wo_params(m)))
+has_x0_encoding(m::MTDSModel) = error(format("It's not known whether {:s} uses an x0 (recurrent "*
+ "state) encoder. Please implement `has_x0_encoding(m)` for this type.", get_strtype_wo_params(m)))
 
 forward(m::MTDSModel, x0, z, U; T_steps=size(U, 2)) =
     error(format("Not Implemented Yet: {:s}. Please implement a forward proc (given z).", string(typeof(m))))

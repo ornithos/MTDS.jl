@@ -21,7 +21,7 @@ e1(n) = e_k(Float32, n, 1)
 
 unsqueeze(xs, dim) = reshape(xs, (size(xs)[1:dim-1]..., 1, size(xs)[dim:end]...));
 vflatten(x) = reduce(vcat, x)
-collapsedims1_2(X::AbstractArray) = reshape(X, (prod(size(X)[1:2]), size(X)[3]))
+collapsedims1_2(X::AbstractArray) = reshape(X, prod(size(X)[1:2]), size(X)[3])
 """
     get_strtype_wo_params(x)
 
@@ -55,6 +55,15 @@ function sq_diff_matrix(X, Y)
     @assert size(out) == (size(normsq_x, 1), size(normsq_y, 1))
     out .-= 2*X * Y'
     return out
+end
+
+sq_diff_matrix(X::MaskedArray, Y) = _sq_diff_matrix_masked(X, Y)
+sq_diff_matrix(X, Y::MaskedArray) = _sq_diff_matrix_masked(X, Y)
+sq_diff_matrix(X::MaskedArray, Y::MaskedArray) = _sq_diff_matrix_masked(X, Y)
+function _sq_diff_matrix_masked(X, Y)
+    # This is over an order of magnitude slower than the above
+    n_x, n_y = size(X, 1), size(Y, 1)
+    [sum(x->x^2, rm_nan(X[i,:]-Y[j,:])) for i in 1:n_x, j in 1:n_y]
 end
 
 function _softmax_lse!(out::AbstractVecOrMat{T}, xs::AbstractVecOrMat{T}) where T<:AbstractFloat
@@ -271,7 +280,7 @@ end
 """
     MaskedArray(x::AbstractArray)
 
-I've been dissatisfied for some time about how AD engines etc tend to handle missing values (historically, they basically couldn't, and required a hack. The hack is not terribly hard, but it requires additional overhead for coding and data structures etc. This was an attempt to show that this could be easily handled using a new type of array. But... turns out that a lot more work is needed and I need to understand more about Julia internals to make this work properly (especially Broadcasting), and would need to spend quite some time integrating with Flux's Tracker which is now ~ defunct anyway. So I gave up halfway! Nevertheless, I found the resulting class moderately useful.
+I've been dissatisfied for some time about how AD engines etc tend to handle missing values (historically, they basically couldn't, and required a hack... the hack is not terribly hard, but it requires additional admin for coding and data structures etc.) This was an attempt to show that this could be easily handled using a new type of array. But... turns out that a lot more work is needed and I need to understand more about Julia internals to make this work properly (especially Broadcasting), and would need to spend quite some time integrating with Flux's Tracker which is now ~ defunct anyway. So I gave up halfway! Nevertheless, I found the resulting class moderately useful.
 
 The idea is that missing values (represented by NaNs¹) can be handled by a (`.mask`) matrix which determines where the missing values go. The array is then represented with a (`.data`) matrix **only** with numbers in ℝ -- where the missing values might be replaced with any value, but often zero. To recover the original matrix with missing values, the `as_nan` function creates a copy of the `.data` and places the `NaN`s back in their correct place from the mask. 
 
@@ -291,7 +300,7 @@ THIS DOES NOT ALLOW BROADCASTING, and getting to grips with how broadcasting wor
 
 **Footnote:**
 
-¹I know Julia introduced `missing` with very good support and apparently performance some time ago, but this idea predates this being well supported. I don't know how well it is supported in AD these days. This whole data structure might be entirely unnecessary these days.
+¹I know Julia introduced `missing` with very good support and apparently performance some time ago, but this idea predates this being well supported. I don't know how well it is supported in AD these days. This whole data structure might be entirely unnecessary now.
 """
 struct MaskedArray{T, N} <: AbstractArray{T, N}
     data::AbstractArray{T, N}
@@ -310,6 +319,8 @@ MaskedArray(x::AbstractArray) = make_masked_array(x)
 
 data(x::MaskedArray) = x.data
 mask(x::MaskedArray) = x.mask
+data(x::AbstractArray) = x
+mask(x::AbstractArray) = fill(true, size(x))
 
 # A key problem is here => this works fine provided >=1 of the indices are  
 Base.getindex(x::MaskedArray, I...) = MaskedArray(x.data[I...], x.mask[I...])
@@ -332,6 +343,7 @@ as_nan(x::MaskedArray{T,N}) where {T,N} = replace(_as_missing(x), missing=>T(NaN
 rm_nan(x::MaskedArray{T,N}) where {T,N} = collect(skipmissing(_as_missing(x)))
 zero_maskvals(x::MaskedArray, y::AbstractArray) = y .* mask(x)
 zero_maskvals(x::MaskedArray) = zero_maskvals(x, data(x))
+zero_maskvals(x::AbstractArray) = x
 apply_mask(x::MaskedArray, y::AbstractArray) = MaskedArray(zero_maskvals(x, y), mask(x))
 
 
@@ -344,6 +356,13 @@ const vstacked = stacked
 # # For vcat in encode method
 # Base.vcat(x::MaskedArray, y::MaskedArray) = MaskedArray(vcat(data(x), data(y)), 
 #     vcat(mask(x), mask(y)))
+Base.reshape(x::MaskedArray, sz::Int...) = MaskedArray(reshape(data(x), sz...), 
+    reshape(mask(x), sz...))
+Base.reshape(x::MaskedArray, sz::Tuple{Vararg{Int,N}}) where N = MaskedArray(
+    reshape(data(x), sz...), reshape(mask(x), sz...))
+
+Base.repeat(x::MaskedArray, a...; kws...) = MaskedArray(repeat(data(x), a...; kws...), 
+    repeat(mask(x), a...; kws...))
 
 # For comparison and use as Dict keys
 Base.hash(x::MaskedArray, h::UInt) = hash((data(x), mask(x)), h)
@@ -359,6 +378,8 @@ Base.:*(x::MaskedArray, y::AbstractArray) = MaskedArray(data(x) * y, mask(x))
 Base.:*(x::AbstractArray, y::MaskedArray) = MaskedArray(x * data(y), mask(y))
 Base.:/(x::MaskedArray, y::AbstractArray) = MaskedArray(data(x) / y, mask(x))
 Base.:/(x::AbstractArray, y::MaskedArray) = MaskedArray(x / data(y), mask(y))
+Base.adjoint(x::MaskedArray) = MaskedArray(adjoint(data(x)), adjoint(mask(x)))
+
 Base.sum(x::MaskedArray) = sum(zero_maskvals(x))
 Base.sum(x::MaskedArray; dims) = sum(zero_maskvals(x), dims=dims)
 StatsBase.mean(x::MaskedArray; dims) = sum(x, dims=dims) ./ sum(mask(x), dims=dims)

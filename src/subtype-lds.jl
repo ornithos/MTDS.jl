@@ -71,6 +71,10 @@ struct MTLDS_variational{U,V,W,S,T} <: MTDSModel
 end
 
 Flux.@treelike MTLDS_variational
+# common superclass properties
+is_amortized(m::MTLDS_variational) = true
+is_amortized(m::MTLDS_variational{U,V,W,S,T}) where {U <: LookupTable, V,W,S,T} = false
+has_x0_encoding(m::MTLDS_variational) = false
 
 function Base.show(io::IO, l::MTLDS_variational)
     d_x0, d_mt = l.d, size(l.mt_post.Dense1.W, 1)
@@ -137,6 +141,11 @@ end
 
 encode(m::MTLDS_variational, Y::AbstractArray{T}, U::AbstractArray{T}; T_enc=size(Y, 2), 
     stochastic=true) where T = encode(m, vcat(Y, U); T_enc=T_enc, stochastic=stochastic)
+
+encode(m::MTLDS_variational, Y::MaskedArray{T}, U::AbstractArray{T}; T_enc=size(Y, 2), 
+    stochastic=true) where T = 
+    encode(m, vcat(stacked(Y), U); T_enc=T_enc, stochastic=stochastic)
+
 
 function encode(m::MTLDS_variational, data_enc::AbstractArray; T_enc=size(data_enc, 2), stochastic=true)
     m.flag_mt_x0 && error("Unable to modulate x0 currently. Change encoder code, and `_mtlds_model_forward`.")

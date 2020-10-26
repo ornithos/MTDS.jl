@@ -99,11 +99,15 @@ end
 ################################################################################
 
 function encode(m::MTGRU_variational, Y::AbstractArray{T}, U::AbstractArray{T}; T_enc=size(Y, 2), 
-                stochastic=true) where T
-    encode(m, vcat(Y, U); T_enc=T_enc, stochastic=stochastic)
+                T_x0=T_enc, stochastic=true) where T
+    encode(m, vcat(Y, U); T_enc=T_enc, T_x0=T_x0, stochastic=stochastic)
 end
 
-function encode(m::MTGRU_variational, data_enc::AbstractArray; T_enc=size(data_enc,2), 
+encode(m::MTGRU_variational, Y::MaskedArray{T}, U::AbstractArray{T}; T_enc=size(Y, 2), T_x0=T_enc, 
+       stochastic=true) where T = encode(m, vcat(stacked(Y), U); T_enc=T_enc, T_x0=T_x0,
+                                         stochastic=stochastic)
+
+function encode(m::MTGRU_variational, data_enc::AbstractArray; T_enc=size(data_enc,2), T_x0=T_enc,
                            stochastic=true, x0=nothing, z=nothing)
     enc_tform, init_enc, init_post, mt_enc, mt_post = unpack_inference(m)
 
@@ -113,13 +117,15 @@ function encode(m::MTGRU_variational, data_enc::AbstractArray; T_enc=size(data_e
     # RNN 2: Amortized inference for z
     # Technically this should be conditioned on the sample x₀, nevertheless, the posterior
     # of x0 is usually very tight, and the `mt_enc` has access to the same information.
-    z, μ_z, σ_z = posterior_sample(mt_enc, mt_post, data_enc, T_enc, stochastic)
+    z, μ_z, σ_z = posterior_sample(mt_enc, mt_post, data_enc, T_x0, stochastic)
 
     return (z, μ_z, σ_z), (x0, μ_x0, σ_x0)
 end
 
-
+# common superclass properties
+is_amortized(m::MTGRU_variational) = true
 is_amortized(m::MTGRU_variational{U,A,B,V,W,S,N,M,T}) where {A <: LookupTable, U,B,V,W,S,N,M,T} = false
+has_x0_encoding(m::MTGRU_variational) = true
 
 ################################################################################
 ##                                                                            ##
@@ -350,7 +356,12 @@ end
 # ))
 
 
-# overloading elbo_w_kl as we need to use both z and x0 latent vars
+####################################################################################################
+#                                                                                                  #
+#     Overloading some objective subroutines in order to accommodate both z and x0 latent vars     #
+#                                                                                                  #
+####################################################################################################
+
 function elbo_w_kl(m::MTGRU_variational, y::AbstractArray, u::AbstractArray, 
                    data_enc::AbstractArray; kl_coeff=1.0f0, stochastic=true, logstd_prior=nothing, 
                    T_enc=size(u, 2))
@@ -367,4 +378,19 @@ function elbo_w_kl(m::MTGRU_variational, y::AbstractArray, u::AbstractArray,
         nllh += sum(x->x^2, (m.logstd .- logstd_prior[1])./logstd_prior[2])/2
     end
     nllh + kl, kl
+end
+
+"""
+    forward_multiple_z(m::MTDSModel, x0, z, u::AbstractMatrix; maxbatch=200)
+Performs multiple forward passes, partitioned according to the `maxbatch` argument, with a single
+`x0` and `u`, but different `z` values. Returns a matrix of size d_y × T × n_b.
+"""
+function forward_multiple_z(m::MTGRU_variational, x0, z, u::AbstractMatrix; maxbatch=200)
+    M = size(z, 2)
+    ŷs = map(Iterators.partition(1:M, maxbatch)) do cbatch
+        u_rep = repeat(u, outer=(1, 1, length(cbatch)));
+        x0_rep = repeat(x0, outer=(1, length(cbatch))); 
+        m(x0_rep, z[:, cbatch], u_rep)
+    end
+    cat(ŷs..., dims=3)   # problematic if length(ŷs) is too large, but there's no nice `reduce` version in Julia yet.
 end

@@ -4,7 +4,8 @@
 ##                                                                            ##
 ################################################################################
 
-function check_inputs_outputs(m::MTDSModel, Ys::AbstractArray{T1}, Us::AbstractArray{T2}) where {T1, T2}
+function check_inputs_outputs(m::MTDSModel, Ys::AbstractArray{T1}, Us::AbstractArray{T2};
+    tT=nothing, T_enc=nothing) where {T1, T2}
     @assert T1 === T2 format("Y is type {:s}, but U is type {:s}", string(T1), string(T2))
     no_inputs, has_inputs = false, true        # for readability of return value
     @argcheck ndims(Ys) == 3
@@ -13,6 +14,12 @@ function check_inputs_outputs(m::MTDSModel, Ys::AbstractArray{T1}, Us::AbstractA
     # (size(Us, 3) == 1) && all(Us .≈ 0) && return no_inputs # idiom for no inputs
     (size(Us, 3) == 1) && return no_inputs # idiom for no inputs (or same inputs ∀ seqs i)
     @argcheck size(Ys, 3) == size(Us, 3)
+
+    tT, T_enc = something(tT, 0), something(T_enc, 0)
+    total_t = max(tT, T_enc)
+    (T_enc > tT) && @warn "encoding length T_enc > prediction length"
+    @argcheck size(Ys, 2) >= total_t
+    @argcheck size(Us, 2) >= total_t
     return has_inputs
 end
 
@@ -161,12 +168,25 @@ marginal log probability of each.
 """
 function _aggregate_importance_smp(y_mc::AbstractArray{T,3}, y_query::AbstractArray{T,3}, logσ, tT) where T
     s = exp.(logσ)
-    n_y = length(logσ)
-    M = size(y_mc, 3)
+    n_y, M = length(logσ), size(y_mc, 3)
     y_query, y_mc = util.collapsedims1_2(y_query ./ s), util.collapsedims1_2(y_mc ./ s)
 
     logW = - util.sq_diff_matrix(y_mc', y_query') / 2   # [log p(y_i | z_j) i = 1..N, j = 1..M]
     logW .-= tT * (sum(logσ)*2 + n_y*log(2π)) / 2   # normalizing constant
+
+    W, lse = util.softmax_lse!(logW; dims=1)
+    logp_y = lse .- log(M)  # W, log(1/M sum_j exp(log_j))
+    return W, logp_y
+end
+
+function _aggregate_importance_smp(y_mc::AbstractArray{T,3}, y_query::MaskedArray{T,3}, logσ, tT) where T
+    s = exp.(logσ)
+    n_y, M = length(logσ), size(y_mc, 3)
+    y_query, y_mc = MaskedArray(y_query.data ./ s, y_query.mask), y_mc ./ s
+    y_q, y_mc = util.collapsedims1_2(y_query), util.collapsedims1_2(y_mc)
+    non_nans = dropdims(sum(y_query.mask[:,1:tT,:], dims=2), dims=2)
+    logW = - util.sq_diff_matrix(y_mc', y_q') / 2   # [log p(y_i | z_j) i = 1..N, j = 1..M]
+    logW .-= sum(non_nans .* (2*logσ .+ f32(log(2π))), dims=1) / 2
 
     W, lse = util.softmax_lse!(logW; dims=1)
     logp_y = lse .- log(M)  # W, log(1/M sum_j exp(log_j))
@@ -186,10 +206,12 @@ function _aggregate_importance_smp_noamortize(m::MTDSModel, y::AbstractArray{T,3
 end
 
 function _importance_smp_individual(m::MTDSModel, y::AbstractArray{T,2},
-        u::AbstractArray{T,2}, z::AbstractArray{T,2}; tT=80, M=200, maxbatch=200) where T
+        u::AbstractArray{T,2}, z::AbstractArray{T,2}; tT=size(u,2), M=size(z,2), 
+        maxbatch=200) where T
     yhats = forward_multiple_z(m, z, u; maxbatch=maxbatch)    # n_y × tT × n_b
+    y = unsqueeze(y, 3)
 
-    llh_by_z = - _gauss_nllh_individual_bybatch(yhats, y, m.logstd)
+    llh_by_z = - _gauss_nllh_individual_bybatch(y, yhats, m.logstd)
     W, lse = util.softmax_lse!(unsqueeze(llh_by_z, 2); dims=1)
     logp_y = sum(lse) - log(M)  # W, log(1/M sum_j exp(log_j))
     return vec(W), logp_y
@@ -291,8 +313,8 @@ end
 
 
 function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=size(Ys,2),
-        T_enc=tT, ps=Flux.params(m), verbose=true, logstd_prior=nothing)
-    has_inputs = check_inputs_outputs(m, Ys, Us)
+        T_enc=tT, ps=Flux.params(m), verbose=true, logstd_prior=nothing, random_t=false)
+    has_inputs = check_inputs_outputs(m, Ys, Us; tT=tT, T_enc=T_enc)
 
     # check if used default params
     # default_ps = length(setdiff(collect(Flux.params(m)), collect(Flux.params(m)))) == 0
@@ -300,8 +322,10 @@ function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=siz
     #                      "during this process. These can be added the next time you train."
     # useful shorthand
     β_kl = opt_pars.kl_mult
-    n_y, tT, N = size(Ys)
+    n_y, _tT, N = size(Ys)
     Nb = opt_pars.nbatch
+    has_x0_enc = has_x0_encoding(m)
+    (random_t) && @warn "Not implemented random_t yet."
 
     history = ones(nepochs) * NaN
     for ee in 1:nepochs
@@ -313,7 +337,7 @@ function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=siz
             ixs = rand(1:N, Nb)
             y = selectdim(Ys, ndims(Ys), ixs) # batch = final dim.
             u = has_inputs ? selectdim(Us, ndims(Us), ixs) : repeat(Us, outer=(1,1,Nb))
-
+            
             # Calculate ELBO
             loss, kl = elbo_w_kl(m, y, u;
                 kl_coeff = β_kl * opt_pars.kl_pct,
@@ -321,6 +345,8 @@ function train_elbo!(m, Ys, Us, nepochs; opt_pars=training_params_elbo(), tT=siz
                 logstd_prior = logstd_prior,
                 T_enc=T_enc)
             
+            # if has_x0_enc
+                
             # loss += 0.01*sum(abs, m.hphi.W)   # regularization of MT network
 
             # update KL annealing

@@ -69,6 +69,12 @@ struct MTPD_variational{U,V,W,S,T} <: MTDSModel
 end
 
 Flux.@treelike MTPD_variational
+# common superclass properties
+is_amortized(m::MTPD_variational) = true
+is_amortized(m::MTPD_variational{U,V,W,S,T}) where {U <: LookupTable,V,W,S,T} = false
+has_x0_encoding(m::MTPD_variational) = false
+
+getL(m::MTPD_variational) = size(m.emission_coeffs, 1)
 
 function Base.show(io::IO, l::MTPD_variational)
     d_x0, d_mt = l.d, size(l.mt_post.Dense1.W, 1)
@@ -79,8 +85,6 @@ function Base.show(io::IO, l::MTPD_variational)
     ", x0_type=", h0_type,  ", enc_type=", enc_type,")")
 end
 
-is_amortized(m::MTPD_variational{U,V,W,S,T}) where {U <: LookupTable,V,W,S,T} = false
-getL(m::MTPD_variational) = size(m.emission_coeffs, 1)
 
 function f_theta_unpack(θ::AbstractVector, m) 
     dx = dy = m.d
